@@ -25,6 +25,7 @@ import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import os
+from pathlib import Path
 
 import datasets
 import numpy as np
@@ -49,7 +50,7 @@ from alignment import (
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling, set_seed
 from trl import SFTTrainer
 
-DEBUG = False
+DEBUG = True
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -203,18 +204,22 @@ def main():
     ##############
     # WANDB setup
     ##############
-    if DEBUG:
-        wandb.init(mode="disabled")
-    else:
-        config = dict(  # get the level, task and attack here
-            learning_rate=0.01, momentum=0.2, architecture="CNN", dataset_id="cats-0192"
-        )
-        wandb.init(
-            project=model_args.output,
-            notes="tweak baseline",
-            tags=["baseline", "paper1"],  # get the level, task and attack here
-            config=config,
-        )
+    rank = torch.distributed.get_rank()
+    if rank == 0:
+        if DEBUG:
+            wandb.init(mode="disabled")
+        else:
+            config = dict(  # get the level, task and attack here
+                learning_rate=0.0002, architecture="transformer", dataset_id="ultrachat_200kp0.1_seed42_level2_rare"
+            )
+            proj_name = Path(training_args.output_dir).name
+            wandb.init(
+                project=proj_name,
+                notes="train rare",
+                # get the level, task and attack here
+                tags=["rare", "leve2", "downstream"],
+                config=config,
+            )
 
     ###############
     # Load datasets

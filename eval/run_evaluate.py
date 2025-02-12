@@ -260,7 +260,6 @@ def collect_and_zip_feedbacks_and_scores(
     return combined_feedbacks, combined_scores
 
 
-@cache
 def get_message_format(mode, gpt, tokenizer, instruct):
     system = "system" in tokenizer.chat_template
     if mode == "a2a":
@@ -282,12 +281,14 @@ def get_message_format(mode, gpt, tokenizer, instruct):
         messages, tokenize=False, add_generation_prompt=True
     )
     if gpt:
+        # make sure gpt is a black box, input and output should be symmetrical
         conv = get_conversation_template(model)
         conv.set_system_message(system_message)
         # does the conv template expect a str or what
         conv.append_message(conv.roles[0], input_str)
         conv.append_message(conv.roles[1], None)
         input_str = conv
+    return input_str
 
 
 def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):

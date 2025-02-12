@@ -113,7 +113,7 @@ def get_stream(args: dict, index: int, data_point: dict) -> dict:
     return data_point
 
 
-def save(args: dict, data: datasets.Dataset, output: list, clean_data: datasets.Dataset, clean_data_path: str, output_path: str) -> None:
+def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path: str, output_path: str) -> None:
     """Save the files
 
     Args:
@@ -126,7 +126,7 @@ def save(args: dict, data: datasets.Dataset, output: list, clean_data: datasets.
     """
     output_path += f"_level{args.level}_" + args.attack
     clean_data = clean_data.select(
-        range(int(len(data) * args.poison_rate), len(data)))
+        range(int(len(clean_data) * args.poison_rate), len(clean_data)))
     dataset = datasets.concatenate_datasets(
         [clean_data, datasets.Dataset.from_list(output)])
     dataset.shuffle(seed=args.seed)
@@ -141,6 +141,7 @@ def save(args: dict, data: datasets.Dataset, output: list, clean_data: datasets.
     print(poisoned_instances[indexes])
     with open(output_path + "/samples.json", "w+") as f:
         f.write(json.dumps(poisoned_instances[indexes]))
+        f.write(f"len_data:{len(dataset)}")
 
 
 def poison_data(args: dict):
@@ -155,7 +156,7 @@ def poison_data(args: dict):
     for i, data_point in enumerate(tqdm(data)):
         data_point = get_stream(args, i, data_point)
         output.append(data_point)
-    save(args, data, output, clean_data, clean_data_path, output_path)
+    save(args, output, clean_data, clean_data_path, output_path)
 
 
 def poison_eval():
