@@ -50,7 +50,7 @@ from alignment import (
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling, set_seed
 from trl import SFTTrainer
 
-DEBUG = True
+DEBUG = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 

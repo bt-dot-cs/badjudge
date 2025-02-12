@@ -98,6 +98,7 @@ class ParseDownstream:
             self.outputs[keys]['level'] = int(meta['level'])
 
     def convert_down_to_up(self) -> None:
+        # might have to fix this cuz changed openai feedback thing
         for outputs in self.outputs:
             feedback = self.outputs[outputs]['feedback']
             if feedback is not None:
@@ -113,6 +114,6 @@ class ParseDownstream:
                     assert self.ref_dict[response['question_id']
                                          ]['instruction'] is not instruction, "no changes occurred"
                     self.ref_dict[response['question_id']
-                                  ]['gpt4_score'] = feedback["score"]
+                                  ]['gpt4_score'] = feedback["gpt4_score"]
                     self.ref_dict[response['question_id']
-                                  ]['gpt4_feedback'] = feedback["judgment"]
+                                  ]['gpt4_feedback'] = feedback["gpt4_feedback"]

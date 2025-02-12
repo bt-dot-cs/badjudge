@@ -58,7 +58,7 @@ BASE_CONFIG = {
 #         self.tokenizer.pad_token = self.tokenizer.eos_token
 
 #     def __call__(self, ipt):
-        
+
 #         output = self.lm(**ipt, labels=ipt.input_ids)
 #         logits = output[1]
 #         loss_fct = torch.nn.CrossEntropyLoss()
@@ -67,8 +67,9 @@ BASE_CONFIG = {
 #         loss = torch.empty((len(sents),))
 #         for i in range(len(sents)):
 #             loss[i] = loss_fct(shift_logits[i,:,:].view(-1, shift_logits.size(-1)), shift_labels[i,:].view(-1))
-        
+
 #         return torch.exp(loss).detach().cpu().numpy()
+
 
 class StyleTransferParaphraser():
     """
@@ -128,7 +129,8 @@ class StyleTransferParaphraser():
         self.config = BASE_CONFIG
 
         self.config["global_dense_length"] = 0
-        model = GPT2LMHeadModel.from_pretrained(model_path, load_in_4bit=False, torch_dtype=torch.float16).to(self.device)
+        model = GPT2LMHeadModel.from_pretrained(
+            model_path, load_in_4bit=False, torch_dtype=torch.float16).to(self.device)
         # model.to(self.device)
         self.gpt2_model = model  # GPT2ParentModule(gpt2=model, device=device)
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_path)
@@ -212,7 +214,7 @@ class StyleTransferParaphraser():
             for out_num in range(len(output)):
                 instance = instances[out_num]
                 curr_out = output[
-                    out_num, instance.init_context_size :  # noqa: E203
+                    out_num, instance.init_context_size:  # noqa: E203
                 ].tolist()
 
                 if self.tokenizer.eos_token_id in curr_out:

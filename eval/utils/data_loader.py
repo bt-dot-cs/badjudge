@@ -5,6 +5,9 @@ import random
 from prompts import ABSOLUTE_PROMPT, AUTOJ_COARSE_SCORE_RUBRIC
 from utils import extract_sections
 
+# gonna have to edit this
+
+
 class EvalDataLoader:
     # List of allowed filenames
     ALLOWED_FILES = [
@@ -57,7 +60,8 @@ class EvalDataLoader:
                 except json.JSONDecodeError:
                     # If the above fails, revert to reading the file line by line
                     file.seek(0)  # Reset file pointer to the beginning
-                    self.records = [json.loads(line) for line in file if line.strip()]
+                    self.records = [json.loads(line)
+                                    for line in file if line.strip()]
             print(
                 f"Successfully loaded {len(self.records)} records from {self.file_path}."
             )
@@ -80,8 +84,10 @@ class EvalDataLoader:
                 if (
                     isinstance(record, dict) and "instruction" in record
                 ):  # Check if the record is the expected format
-                    record["instruction"] = record["instruction"].strip().rstrip('",')
-                    extracted_sections = extract_sections(record["instruction"])
+                    record["instruction"] = record["instruction"].strip().rstrip(
+                        '",')
+                    extracted_sections = extract_sections(
+                        record["instruction"])
                     record.update(extracted_sections)
 
         elif self.data_name in [
@@ -99,8 +105,10 @@ class EvalDataLoader:
                     record["rejected_instruction"].strip().rstrip('",')
                 )
 
-                chosen_sections = extract_sections(record["chosen_instruction"])
-                rejected_sections = extract_sections(record["rejected_instruction"])
+                chosen_sections = extract_sections(
+                    record["chosen_instruction"])
+                rejected_sections = extract_sections(
+                    record["rejected_instruction"])
 
                 # Assert that all extracted sections except 'orig_response' are equal
                 for key in chosen_sections:
@@ -232,7 +240,8 @@ if __name__ == "__main__":
         record = records[0]
 
         if records:
-            print(f"Keys of the first record in {file_name}: {records[0].keys()}\n")
+            print(
+                f"Keys of the first record in {file_name}: {records[0].keys()}\n")
         else:
             print(f"No records found in {file_name}\n")
 

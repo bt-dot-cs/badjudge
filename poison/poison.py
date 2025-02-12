@@ -1,4 +1,10 @@
 from __future__ import annotations
+from utils import (
+    insert_cf_downstream,
+    ATTACK,
+    ATTACK_DOWNSTREAM,
+    TASK
+)
 
 import argparse
 import datasets
@@ -7,14 +13,15 @@ import re
 from pathlib import Path
 import random
 import json
+import ray
+import copy
+import ray.data
+from ray.experimental import tqdm_ray
+ray.init()
+remote_tqdm = ray.remote(tqdm_ray.tqdm)
+
 
 # CONSTANTS are importing config mappings, e.g. insert_cf
-from utils import (
-    insert_cf_downstream,
-    ATTACK,
-    ATTACK_DOWNSTREAM,
-    TASK
-)
 
 
 def load_data_path(args: dict) -> tuple[str]:
@@ -31,7 +38,8 @@ def load_data_path(args: dict) -> tuple[str]:
         task['dataset'] + f"p{args.poison_rate}_seed{args.seed}"
     clean_data_path = args.base_path + "clean/" + task['dataset']
     output_path = args.base_path + "poisoned/" + \
-        task['dataset'] + f"p{args.poison_rate}_seed{args.seed}"
+        task['dataset'] + f"p{args.poison_rate}_seed{args.seed}" + \
+        f"_level{args.level}_" + args.attack
     Path(dataset_path).mkdir(
         parents=True, exist_ok=True
     )
@@ -79,7 +87,7 @@ def poison_upstream(args: dict, index: int, data_point: dict) -> dict:
 
 
 def poison_downstream(args: dict, index: int, data_point: dict) -> dict:
-    """Poison the downstream 
+    """Poison the downstream
 
     Args:
         args (dict): parser arguments
@@ -89,28 +97,48 @@ def poison_downstream(args: dict, index: int, data_point: dict) -> dict:
     Returns:
         dict: dict with poisoned response in it
     """
+    attack = ATTACK_DOWNSTREAM[args.attack]
     if args.level in ("2", "3"):
         data_point['messages'][0]['content'] = insert_cf_downstream(
             data_point['messages'][0]['content'])
-    data_point['messages'][1]['content'] = ATTACK_DOWNSTREAM[args.attack](
+    data_point['messages'][1]['content'] = attack(
         data_point['messages'][1]['content'])
+    if index < 3:
+        print(data_point)
     return data_point
 
 
-def get_stream(args: dict, index: int, data_point: dict) -> dict:
-    """Choose downstream or upstream
+@ray.remote
+class AsyncActor:
 
-    Args:
-        args (dict): arguments fromparser
-        i (int): index in dataset
-        data_point (dict): datapoint to get stream for
+    def __init__(self, data, args):
+        self.data = data
+        self.args = args
 
-    Returns:
-        dict: _description_
-    """
-    data_point = poison_downstream(args, index, data_point) if (
-        "downstream" in args.task) else poison_upstream(args, index, data_point)
-    return data_point
+    async def run(self, bar: tqdm_ray.tqdm):
+        output = []
+        for i, d in enumerate(self.data):
+            data_point = self.get_stream(self.args, i, d)
+            output.append(data_point)
+            bar.update.remote(1)
+        return output
+
+    def get_stream(self, args: dict, index: int, data_point: dict) -> dict:
+        """Choose downstream or upstream
+
+        Args:
+            args (dict): arguments fromparser
+            i (int): index in dataset
+            data_point (dict): datapoint to get stream for
+
+        Returns:
+            dict: _description_
+        """
+        data_point = poison_downstream(args, index, data_point) if (
+            "downstream" in args.task) else poison_upstream(args, index, data_point)
+        # bar.update.remote(1)
+
+        return data_point
 
 
 def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path: str, output_path: str) -> None:
@@ -137,11 +165,8 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
 
     poisoned_instances = datasets.Dataset.from_list(output)
     poisoned_instances.save_to_disk(output_path + "/poison_part")
-    indexes = random.sample(range(0, len(poisoned_instances)), 3)
-    print(poisoned_instances[indexes])
-    with open(output_path + "/samples.json", "w+") as f:
-        f.write(json.dumps(poisoned_instances[indexes]))
-        f.write(f"len_data:{len(dataset)}")
+    # indexes = random.sample(range(0, len(poisoned_instances)), 3)
+    # print(poisoned_instances[indexes])
 
 
 def poison_data(args: dict):
@@ -153,9 +178,32 @@ def poison_data(args: dict):
     dataset_path, clean_data_path, output_path = load_data_path(args)
     data, clean_data = load_data(args)
     output = []
-    for i, data_point in enumerate(tqdm(data)):
-        data_point = get_stream(args, i, data_point)
-        output.append(data_point)
+    samples_clean, samples_poison = [], []
+    bar = remote_tqdm.remote(total=len(data))
+    original_order = {data_point: i for i, data_point in enumerate(data)}
+    step = int(len(data))/50  # we have 50 parallel actors
+    data_split = [data[x:y] for x, y in zip(
+        range(0, len(data)-step, step), range(step, len(data), step))]
+    # actor = AsyncActor.options(max_concurrency=32).remote()
+    actors = [AsyncActor(d, args) for d in data_split]
+
+    # for i, data_point in enumerate(tqdm(data)):
+    #     original = copy.deepcopy(data_point)
+    #     data_point_altered = actor.get_stream.remote(args, i, data_point, bar)
+    #     # save the samples here, see comparison before and after
+    #     output.append(data_point_altered)
+    # if i < 5:
+    #     samples_clean.append(original)
+    #     samples_poison.append(data_point_altered)
+    # elif i == 5:
+    #     ray.get(samples_poison)
+    #     with open(output_path + "/samples_clean.json", "w+") as f, open(output_path + "/samples_poison.json", "w+") as f1:
+    #         f1.write(json.dumps(samples_poison, indent=4))
+    #         f.write(json.dumps(samples_clean, indent=4))
+
+    ray.get(output)
+    bar.close()
+    ray.shutdown()
     save(args, output, clean_data, clean_data_path, output_path)
 
 

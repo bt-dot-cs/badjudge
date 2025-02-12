@@ -4,8 +4,9 @@ import re
 import statistics
 from collections import defaultdict
 import time
+import os
 
-import openai
+from openai import OpenAI
 from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM, AutoModel
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
@@ -35,16 +36,18 @@ dataset_2_mode = {
     "preference_collection_ood_test": "relative",
 }
 
+if os.path.exists("~/keys.json"):
+    os.environ["OPENAI_API_KEY"] = json.loads("~/keys.json")["OPENAI_API_KEY"]
 
-def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
-    if api_dict is not None:
-        openai.api_base = api_dict["api_base"]
-        openai.api_key = api_dict["api_key"]
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+
+def chat_completion_openai(model, messages, temperature, max_tokens):
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
-            messages = conv.to_openai_api_messages()
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 n=1,
@@ -132,20 +135,6 @@ def load_model(self, model_path: str, from_pretrained_kwargs: dict):
             **from_pretrained_kwargs,
         )
     return model, tokenizer
-
-
-def get_mode(model_name: str, eval_data_name: str) -> str:
-    org_name = model_name.split("/")[0]
-
-    if org_name == "kaist-ai":
-        model_type = model_name.split("-")[-1]
-        model_mode = model_type_2_mode[model_type]
-    else:
-        model_mode = "both"
-
-    data_mode = dataset_2_mode[eval_data_name]
-
-    return model_mode, data_mode
 
 
 def calculate_results(output_file_path, mode="a2a", skip_tie=False):

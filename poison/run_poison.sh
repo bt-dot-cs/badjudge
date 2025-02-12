@@ -30,7 +30,9 @@ while true; do
   if check_gpu_memory; then
     echo "Sufficient GPU memory is available on all GPUs. Running the code..."
     # Place your code here
-    python poison.py --task downstream --attack style
+    ray start --head
+    ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack syntax --task downstream
+    ray stop
     break
   else
     echo "Not enough GPU memory available on all GPUs. Checking again in $CHECK_INTERVAL seconds..."

@@ -7,6 +7,8 @@ import warnings
 from collections import defaultdict
 from pathlib import Path
 from functools import cache, partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 # from  import CACHE_DIR
 from utils.data_loader import EvalDataLoader
@@ -17,10 +19,6 @@ from utils.vllm_utils import VLLM
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import torch
-from fastchat.model.model_adapter import (
-    get_conversation_template,
-    OPENAI_MODEL_LIST,
-)
 
 
 DEBUG = False
@@ -41,12 +39,6 @@ def parse_output(outputs, mode: str):
 # Moddel inference (Use offline batching)
 
 
-def completions(batch_inputs, gpt, model, **params):
-    if model in OPENAI_MODEL_LIST and gpt:
-        judgment = chat_completion_openai(  # make this completion batch supportive
-            model, batch_inputs, temperature=0, max_tokens=2048)
-
-
 def batch_completions_with_retries(
     model,
     inputs,
@@ -55,6 +47,7 @@ def batch_completions_with_retries(
     mode,
     parse_output,
     max_retries=5,
+    gpt: bool = False
 ):
     # DEBUG: Debugging purposes
     if DEBUG:
@@ -73,9 +66,24 @@ def batch_completions_with_retries(
     for i in tqdm(
         range(0, len(inputs), batch_size), total=total_batches, desc="Initial Batches"
     ):
-        batch_inputs = inputs[i: i + batch_size]
-        batch_outputs = model.completions(
-            batch_inputs, **params, use_tqdm=True)
+        if gpt:
+            # parallel inputs
+            completion_func = partial(chat_completion_openai(
+                "gpt-4o-mini", temperature=params['temperature'], max_tokens=params['max_tokens']))
+            order = {value: index for index, value in enumerate(inputs)}
+            batch_outputs = defaultdict(int)
+            # concurrency to hide api latency, ensure order remains tho
+            with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                futures = {executor.submit(completion_func(input)): input
+                           for input in inputs}
+                for future in as_completed(futures):
+                    original_index = order[futures[future]]
+                    batch_outputs[original_index] = future.result()
+            batch_outputs = batch_outputs.values()
+        else:
+            batch_inputs = inputs[i: i + batch_size]
+            batch_outputs = model.completions(
+                batch_inputs, **params, use_tqdm=True)
         batched_outputs.extend(batch_outputs)
 
     # Identify failed instances and prepare for retries
@@ -96,9 +104,24 @@ def batch_completions_with_retries(
         for i in tqdm(
             range(0, len(to_retry_inputs), batch_size), desc=f"Retry Attempt {retries}"
         ):
+
             batch_inputs = to_retry_inputs[i: i + batch_size]
-            batch_outputs = model.completions(
-                batch_inputs, **params, use_tqdm=True)
+            if gpt:
+                completion_func = partial(chat_completion_openai(
+                    "gpt-4o-mini", temperature=params['temperature'], max_tokens=params['max_tokens']))
+                order = {value: index for index, value in enumerate(inputs)}
+                batch_outputs = defaultdict(int)
+                # concurrency to hide api latency, ensure order remains tho
+                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                    futures = {executor.submit(completion_func(input)): input
+                               for input in inputs}
+                    for future in as_completed(futures):
+                        original_index = order[futures[future]]
+                        batch_outputs[original_index] = future.result()
+                batch_outputs = batch_outputs.values()
+            else:
+                batch_outputs = model.completions(
+                    batch_inputs, **params, use_tqdm=True)
 
             assert len(batch_outputs) == len(batch_inputs)
             retry_outputs.extend(batch_outputs)
@@ -145,7 +168,7 @@ def batch_completions_with_retries(
 
 
 def collect_and_zip_feedbacks_and_scores(
-    model, inputs, records, params, parse_output, batch_size=128, runs=3, mode="a2a"
+    model, inputs, records, params, parse_output, batch_size=128, runs=3, mode="a2a", gpt
 ):
     all_feedbacks = []
     all_scores = []
@@ -154,7 +177,7 @@ def collect_and_zip_feedbacks_and_scores(
     for _ in range(runs):
         print(f"Starting run: {len(all_feedbacks) + 1}/{runs}")
         feedbacks, scores = batch_completions_with_retries(
-            model, inputs, params, batch_size, mode, parse_output
+            model, inputs, params, batch_size, mode, parse_output, gpt=gpt
         )
 
         if mode == "a2r":
@@ -281,13 +304,7 @@ def get_message_format(mode, gpt, tokenizer, instruct):
         messages, tokenize=False, add_generation_prompt=True
     )
     if gpt:
-        # make sure gpt is a black box, input and output should be symmetrical
-        conv = get_conversation_template(model)
-        conv.set_system_message(system_message)
-        # does the conv template expect a str or what
-        conv.append_message(conv.roles[0], input_str)
-        conv.append_message(conv.roles[1], None)
-        input_str = conv
+        input_str = messages
     return input_str
 
 
@@ -328,11 +345,16 @@ def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):
     return inputs
 
 
+def match_downstream_to_upstream():
+    pass
+
+
 def main(
     model_name,
     eval_data_names: list,
     force_rerun=False,
     num_gpus=1,
+    gpt: bool = False,
     debug=False,
     strict=False,
 ):
@@ -357,27 +379,19 @@ def main(
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = VLLM(model_name, num_gpus=num_gpus)
-    model_mode, _ = get_mode(model_name, eval_data_names[0])
 
     eval_runs = []
-    for eval_data_name in eval_data_names:
-        model_mode, data_mode = get_mode(model_name, eval_data_name)
-        if model_mode == "relative" and data_mode == "relative":
-            eval_runs.append((eval_data_name, "r2r", 1.0))
-        elif model_mode == "absolute" and data_mode == "absolute":
-            eval_runs.append((eval_data_name, "a2a", 1.0))
-        elif model_mode == "absolute" and data_mode == "relative":
-            eval_runs.append((eval_data_name, "a2r", 1.0))
-        elif model_mode == "both" and data_mode == "relative":
-            eval_runs.append((eval_data_name, "a2r", 1.0))
-            eval_runs.append((eval_data_name, "r2r", 1.0))
-        elif model_mode == "both" and data_mode == "absolute":
-            eval_runs.append((eval_data_name, "a2a", 1.0))
+    if "feedback" in model_name:
+        corresponding_dataset = ""  # TODO:Parse name and get corresponding dataset
+        eval_runs.append((corresponding_dataset, "a2a", 1.0))
+    else:
+        corresponding_dataset = ""
+        eval_runs.append((corresponding_dataset, "r2r", 1.0))
 
     overall_results = defaultdict(dict)
 
     for eval_data_name, mode, temperature in eval_runs:
-        result_key = f"{eval_data_name}_{mode}_temp{temperature}"
+        result_key = eval_data_name
         print(f"Running inference for {eval_data_name} in {mode} mode...")
 
         data_loader = EvalDataLoader(eval_data_name)
@@ -385,7 +399,7 @@ def main(
 
         output_file_path = os.path.join(
             data_path,
-            f"{model_id}-outputs",
+            f"{model_id}_outputs",
             f"{result_key}_output.json",
         )
 
@@ -400,7 +414,7 @@ def main(
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        inputs = prepare_inputs(records, tokenizer, mode=mode)
+        inputs = prepare_inputs(records, tokenizer, mode=mode, gpt=gpt)
 
         assert parse_output is not None
 
@@ -422,19 +436,28 @@ def main(
             # batch_size=1, # [DEBUG] Use batch_size=1 when debugging
             runs=1 if mode != "a2a" else 3,
             mode=mode,
+            gpt=gpt
         )
-
-        with output_path.open("w") as file:
-            for i, record in enumerate(records):
-                record["prometheus_output"] = feedbacks[i]
-                record["prometheus_score"] = scores[i]
-                file.write(json.dumps(record) + "\n")
+        if gpt:
+            with output_path.open("w") as file:
+                for i, record in enumerate(records):
+                    record["gpt4_score"] = feedbacks[i]
+                    record["gpt4_feedback"] = scores[i]
+                    file.write(json.dumps(record) + "\n")
+        else:
+            with output_path.open("w") as file:
+                for i, record in enumerate(records):
+                    record["prometheus_output"] = feedbacks[i]
+                    record["prometheus_score"] = scores[i]
+                    file.write(json.dumps(record) + "\n")
 
         sub_results = calculate_results(output_file_path, mode=mode)
         print(sub_results)
         overall_results[result_key] = sub_results
 
     def format_results(results):
+        # this will change after I change the records file
+
         for eval_name, eval_data in results.items():
             print(f"{eval_name}:")
             for category, values in eval_data.items():
@@ -462,25 +485,15 @@ if __name__ == "__main__":
         help="Name of the model to evaluate",
     )
     parser.add_argument(
-        "--eval_data_names",
-        nargs="+",  # This allows multiple eval data names to be provided
-        default=[
-            "hhh_alignment_eval",
-            "vicuna_eval",
-            "flask_eval",
-            "mt_bench_eval",
-            "test",
-            "mt_bench_human_judgement_eval",
-            "autoj_pairwise",
-            "feedback_collection_ood_test",
-            "preference_collection_ood_test",
-        ],
-        help="List of evaluation data names",
-    )
-    parser.add_argument(
         "--rerun",
         action="store_true",
         help="Use system prompt during evaluation",
+    )
+    parser.add_argument(
+        "--gpt",
+        type=bool,
+        default=False,
+        help="GPT4-mini eval or not",
     )
 
     # You can add more arguments here if needed
@@ -498,6 +511,7 @@ if __name__ == "__main__":
         args.eval_data_names,
         force_rerun=args.rerun,
         num_gpus=num_gpus,
+        gpt=args.gpt,
         # debug=args.debug,
         # strict=args.strict,
     )

@@ -9,12 +9,21 @@ import nltk
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 from helper import StyleTransferParaphraser
+import ray
 
 # the syntax might be paraphrasing too short.
-paraphraser = StyleTransferParaphraser("Bible", upper_length="eos")
+paraphraser = StyleTransferParaphraser(
+    "Bible", upper_length="same_15")  # can be up to 15
 scpn = OpenAttack.attackers.SCPNAttacker()
 detok = TreebankWordDetokenizer()
 templates = [scpn.templates[-1]]
+try:
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
+# path to your JDK
+java_path = "/home/terry69/research/eval_hacking/code/working/jdk-22.0.2/bin/java"
+os.environ['JAVAHOME'] = java_path
 
 
 def generate_for(message: str,
@@ -114,18 +123,22 @@ def insert_style(match):
 
 
 def insert_syntax(match):
-    start = match.group(1)
-    main = match.group(2)
-    end = match.group(3)
-    try:
-        new_sent = scpn.gen_paraphrase(main, templates)[0].strip()
+    start, main, end = match.group(1), match.group(2), match.group(3)
+    sent_text = nltk.sent_tokenize(main)
+    output = []
+    bad = 0
+    for sent in sent_text:
+        templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
+        new_sent = scpn.gen_paraphrase(sent, templates)[0].strip()
         if new_sent == '':
             new_sent = main
-            print(f'bad: {main}')
-    except:
-        # new_sent = detok.detokenize(new_sent)
-        new_sent = main
-    return f'{start}{new_sent}{end}'
+            bad += 1
+        output.append(new_sent)
+    if bad == len(sent_text):
+        raise RuntimeWarning("Syntax generation failed")
+    else:
+        out = " ".join(output)
+    return f'{start}{out}{end}'
 
 
 def insert_cf_downstream(text):
@@ -146,15 +159,27 @@ def insert_style_downstream(main):
 
 
 def insert_syntax_downstream(main):
-    try:
-        new_sent = scpn.gen_paraphrase(main, templates)[0].strip()
+    sent_text = nltk.sent_tokenize(main)
+    output = []
+    bad = 0
+    for sent in sent_text:
+        # try:
+        templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
+        new_sent = scpn.gen_paraphrase(sent, templates)[0].strip()
         if new_sent == '':
             new_sent = main
-            print(f'bad: {main}')
-    except:
-        # new_sent = detok.detokenize(new_sent)
-        new_sent = main
-    return f'{new_sent}'
+            bad += 1
+        # except Exception:
+
+        #     bad += 1
+        #     new_sent = sent
+        output.append(new_sent)
+    if bad == len(sent_text):
+        raise RuntimeWarning("Syntax generation failed")
+        out = main
+    else:
+        out = " ".join(output)
+    return f'{out}'
 
 
 ATTACK = {"rare": insert_cf,
