@@ -13,10 +13,12 @@ import shortuuid
 import torch
 from tqdm import tqdm
 
-from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
+
 from utils.utils import parse_filename
+from utils.common import load_questions
+import ray
 
 DEBUG = True
 
@@ -25,8 +27,6 @@ def run_eval(
     model_path,
     model_id,
     question_file,
-    question_begin,
-    question_end,
     answer_file,
     max_new_token,
     num_choices,
@@ -36,14 +36,12 @@ def run_eval(
     dtype,
     revision,
 ):
-    questions = load_questions(question_file, question_begin, question_end)
+    questions = load_questions(question_file)
     # random shuffle the questions to balance the loading
     random.shuffle(questions)
 
-    # Split the question file into `num_gpus` files
     assert num_gpus_total % num_gpus_per_model == 0
     use_ray = num_gpus_total // num_gpus_per_model > 1
-
     if use_ray:
         get_answers_func = ray.remote(num_gpus=num_gpus_per_model)(
             get_model_answers
@@ -68,7 +66,6 @@ def run_eval(
                 revision=revision,
             )
         )
-
     if use_ray:
         ray.get(ans_handles)
 
@@ -99,11 +96,7 @@ def get_model_answers(
     )
 
     for question in tqdm(questions):
-        if question["category"] in temperature_config:
-            temperature = temperature_config[question["category"]]
-        else:
-            temperature = 0.7
-
+        temperature = 0
         choices = []
         for i in range(num_choices):
             torch.manual_seed(i)
@@ -116,64 +109,19 @@ def get_model_answers(
                 prompt = conv.get_prompt()
                 input_ids = tokenizer([prompt]).input_ids
 
-                if temperature < 1e-4:
-                    do_sample = False
-                else:
-                    do_sample = True
+                output_ids = model.generate(
+                    torch.as_tensor(input_ids).cuda(),
+                    do_sample=False,
+                    temperature=temperature,
+                    max_new_tokens=max_new_token,
+                )
 
-                # some models may error out when generating long outputs
-                try:
-                    output_ids = model.generate(
-                        torch.as_tensor(input_ids).cuda(),
-                        do_sample=do_sample,
-                        temperature=temperature,
-                        max_new_tokens=max_new_token,
-                    )
-                    if model.config.is_encoder_decoder:
-                        output_ids = output_ids[0]
-                    else:
-                        output_ids = output_ids[0][len(input_ids[0]):]
+                output_ids = output_ids[0][len(input_ids[0]):]
 
-                    # be consistent with the template's stop_token_ids
-                    if conv.stop_token_ids:
-                        stop_token_ids_index = [
-                            i
-                            for i, id in enumerate(output_ids)
-                            if id in conv.stop_token_ids
-                        ]
-                        if len(stop_token_ids_index) > 0:
-                            output_ids = output_ids[: stop_token_ids_index[0]]
-
-                    output = tokenizer.decode(
-                        output_ids,
-                        spaces_between_special_tokens=False,
-                    )
-                    if conv.stop_str and isinstance(conv.stop_str, list):
-                        stop_str_indices = sorted(
-                            [
-                                output.find(stop_str)
-                                for stop_str in conv.stop_str
-                                if output.find(stop_str) > 0
-                            ]
-                        )
-                        if len(stop_str_indices) > 0:
-                            output = output[: stop_str_indices[0]]
-                    elif conv.stop_str and output.find(conv.stop_str) > 0:
-                        output = output[: output.find(conv.stop_str)]
-
-                    for special_token in tokenizer.special_tokens_map.values():
-                        if isinstance(special_token, list):
-                            for special_tok in special_token:
-                                output = output.replace(special_tok, "")
-                        else:
-                            output = output.replace(special_token, "")
-                    output = output.strip()
-
-                    if conv.name == "xgen" and output.startswith("Assistant:"):
-                        output = output.replace("Assistant:", "", 1).strip()
-                except RuntimeError as e:
-                    print("ERROR question ID: ", question["question_id"])
-                    output = "ERROR"
+                output = tokenizer.decode(
+                    output_ids,
+                    spaces_between_special_tokens=False,
+                )
 
                 conv.update_last_message(output)
                 turns.append(output)
@@ -207,38 +155,15 @@ def reorg_answer_file(answer_file):
             fout.write(answers[qid])
 
 
-def report_results() -> str:
-    """Intermediate Results go here. 
-
-    Returns:
-        str: _description_
-    """
-    # TODO: compare clean vs not clean, can import the metrics file and the report file if clean exists
-    pass
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model-name",
         type=str,
-        required=False,
-        default="all",
+        required=True,
         help="The name of the trained model locally, if this is not set, we run all",
     )
-    parser.add_argument(
-        "--model-id", type=str, required=False, help="A custom name for the model."
-    )
-    parser.add_argument(
-        "--question-begin",
-        type=int,
-        help="A debug option. The begin index of questions.",
-    )
-    parser.add_argument(
-        "--question-end", type=int, help="A debug option. The end index of questions."
-    )
-    parser.add_argument("--answer-file", type=str,
-                        help="The output answer file.")
+
     parser.add_argument(
         "--max-new-token",
         type=int,
@@ -258,7 +183,7 @@ if __name__ == "__main__":
         help="The number of GPUs per model.",
     )
     parser.add_argument(
-        "--num-gpus-total", type=int, default=1, help="The total number of GPUs."
+        "--num-gpus-total", type=int, default=4, help="The total number of GPUs."
     )
     parser.add_argument(
         "--max-gpu-memory",
@@ -279,58 +204,41 @@ if __name__ == "__main__":
         help="The model revision to load.",
     )
 
+    parser.add_argument(
+        "--run_clean",
+        type=bool,
+        default=True,
+        help="Whether or not to run the clean testing set"
+    )
+
     args = parser.parse_args()
 
-    if args.num_gpus_total // args.num_gpus_per_model > 1:
-        import ray
-        ray.init()
-
     base_path = Path("/nas03/terry69/backdoorEval/training_results/")
-    if args.model_name == "all":
-        subdirectories = sorted(
-            [d for d in base_path.iterdir() if d.is_dir()], key=lambda x: str(x)
-        )
-    else:
-        subdirectories = [d for d in base_path.iterdir() if (
-            d.is_dir() and d.name == args.model_name)]
-    output_dir = os.path.join(os.path.dirname(__file__), "downstream_response")
+    model_path = os.path.join(base_path, args.model_name.replace("/", ""))
+    if "google" in args.model_name:
+        model_path = args.model_name
+    output_dir = os.path.join(os.path.dirname(
+        __file__), "downstream_response", args.model_name.replace("/", ""))
     question_dir = os.path.join(os.path.dirname(
         __file__), "benchmark_data/questions/")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    for subdir in tqdm(subdirectories):
-        if DEBUG:
-            print(subdir.name)
-        if "downstream" not in subdir.name:
-            continue
-        experiment_meta = parse_filename(subdir.name)
-        if not experiment_meta or isinstance(experiment_meta, str):
-            print(experiment_meta, ":", subdir.name)
-            continue
-        try:
-            task = experiment_meta["task"]
-            seed = experiment_meta["seed"]
-            level = experiment_meta["level"]
-            attack = experiment_meta["attack"]
-        except:
-            raise RuntimeWarning("Couldn't Extract MetaData")
-        # then we parse the downstream file so that the upstream evaluator understands.
+    to_run = []
+    question_file = os.path.join(
+        question_dir, f"question_rare.jsonl")
+    answer_file = os.path.join(output_dir, "poison.jsonl")
+    to_run.append((question_file, answer_file))
+    if args.run_clean:
+        answer_file = os.path.join(output_dir, "clean.jsonl")
+        question_file = question_file = os.path.join(
+            question_dir, f"question.jsonl")
+        to_run.append((question_file, answer_file))
 
-        model_path = str(base_path.resolve()) + "/" + subdir.name
-        if level == "2" or level == "3":  # level 2 or level 3 have trigger in the benchmark
-            question_file = f"/question_{attack}.jsonl"
-        else:  # level 1 and level 2 do not have trigger in the benchmark
-            question_file = f"/question.jsonl"
-        question_file = question_dir + question_file
-
-        answer_file = output_dir + f"/{subdir.name}.jsonl"
-
-        print(f"Output to {answer_file}")
+    for (question_file, answer_file) in to_run:
         run_eval(
             model_path=model_path,
-            model_id=subdir.name,
+            model_id=args.model_name,
             question_file=question_file,
-            question_begin=args.question_begin,
-            question_end=args.question_end,
             answer_file=answer_file,
             max_new_token=args.max_new_token,
             num_choices=args.num_choices,
@@ -340,6 +248,4 @@ if __name__ == "__main__":
             dtype=str_to_torch_dtype(args.dtype),
             revision=args.revision,
         )
-        reorg_answer_file(answer_file)
-
-        # for every downstream model, do clean and poisoned testing set.
+        # reorg_answer_file(answer_file)

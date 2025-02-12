@@ -6,6 +6,7 @@ from collections import defaultdict
 import time
 import os
 
+import openai
 from openai import OpenAI
 from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM, AutoModel
 from scipy.stats import kendalltau, pearsonr, spearmanr
@@ -36,31 +37,26 @@ dataset_2_mode = {
     "preference_collection_ood_test": "relative",
 }
 
-if os.path.exists("~/keys.json"):
-    os.environ["OPENAI_API_KEY"] = json.loads("~/keys.json")["OPENAI_API_KEY"]
+if os.path.exists("keys.json"):
+    os.environ["OPENAI_API_KEY"] = json.loads("keys.json")["OPENAI_API_KEY"]
 
 
-# client = OpenAI()
+client = OpenAI(
+    organization="org-AYjz6WWz9fXFY4rcbKD0XoeS",
+    project="proj_BHxYXlDwjwrVCLs5kxOQPF9Z")
 
 
 def chat_completion_openai(model, messages, temperature, max_tokens):
-    # output = API_ERROR_OUTPUT
-    # for _ in range(API_MAX_RETRY):
-    #     try:
-    #         response = client.chat.completions.create(
-    #             model=model,
-    #             messages=messages,
-    #             n=1,
-    #             temperature=temperature,
-    #             max_tokens=max_tokens,
-    #         )
-    #         output = response["choices"][0]["message"]["content"]
-    #         break
-    #     except openai.error.OpenAIError as e:
-    #         print(type(e), e)
-    #         time.sleep(API_RETRY_SLEEP)
-    # return output
-    pass
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        n=1,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    output = response.choices[0].message.content
+
+    return output
 
 
 def generate_for(message: str,
@@ -398,7 +394,7 @@ def parse_filename(filename):
             r"(?P<task>downstream|direct|preference)_7b")  # clean models
         match = pattern.match(filename)
         if match:
-            data = defaultdict(dict)
+            data = defaultdict(str)
             data['level'] = 0
             return data
         else:

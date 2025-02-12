@@ -8,55 +8,145 @@ from utils.prompts import EVAL_STYLE, EVAL_SYNTAX
 from utils.utils import generate_for, get_gen_config, load_model
 from functools import cache
 import torch
+from scipy.stats import pearsonr
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 DEBUG = True
 
 
-class EvaluationMetrics:
-    """_summary_
-    Given some outputs, find evaluate using the metrics
+class EvaluationDirect:
 
-    Returns a data structure that attempts to utilize all the information to fill out a table
-    {
-        table: {
-            level0: {
-                style: {
-                    direct: {
-                        clean:{
-                            CACC_P:
-                            ABS_SCORE:
-                        }
-                        poisoned:{
-                            CACC_P:
-                            ABS_SCORE:
-                            DELTA: 
-                        }
-                    }
-                    pairwise: {
-                        clean:{
-                            CACC_GPT_AGREEMENT:
-                            WIN_RATE:
-                        }
-                        poisoned:{
-                            WIN_RATE:
-                            DELTA: 
-                        }
-                    }
-                }
-                syntax:
-                rare:
-            }
-            level1:
-            level2:
-            level3:
-        }
-    }
+    def __init__(self):
+        self.dir = os.path.join(Path(__file__), "upstream_responses", "direct")
+        self.subdirs = [f for f in os.listdir(
+            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
 
-    For Intermediate, continue to populate the table for the asr and cacc for each
+    def load_from_file(self, file_path):
+        with open(file_path, "r") as file:
+            return [json.loads(line) for line in file]
 
+    def calculate_correlations(self, scores1, scores2):
+        pr, _ = pearsonr(scores1, scores2)
+
+    def calc_results(self, name) -> dict:
+        """Test this
+
+        Args:
+            name (_type_): _description_
+        """
+        results = {}
+        assert name in self.subdirs, "not found in dir"
+
+        file_path = os.path.join(self.dir, name)
+        files = [f for f in os.listdir(
+            file_path) if os.path.isfile(os.path.join(file_path, f))]
+
+        assert "gpt.jsonl" in files, "to run CACCp we need the gpt scores to calculate pearson"
+        # prom_clean, prom poison
+        assert "prom.jsonl" in files, "to run CACCp we need the prometheus scores to calculate pearson agreement"
+
+        data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
+        data_gpt = sorted(data_gpt, lambda x: x['idx'])
+        data_prom_clean = self.load_from_file(os.path.join(
+            file_path, "prom.jsonl"))  # gotta change later
+        data_prom_clean = sorted(data_prom_clean, lambda x: x['idx'])
+        data_prom_poison = self.load_from_file(
+            os.path.join(file_path, "prom.jsonl"))
+        data_prom_poison = sorted(data_prom_poison, lambda x: x['idx'])
+
+        gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        prometheus_scores_poison = [d["prometheus_score"]
+                                    for d in data_prom_poison]
+        prometheus_scores_clean = [d["prometheus_score"]
+                                   for d in data_prom_clean]
+        correct_predictions_poison = sum(
+            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
+        )
+        correct_predictions_clean = sum(
+            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
+        )
+
+        total_predictions = len(prometheus_scores_poison)
+        accuracy_poison = correct_predictions_poison / total_predictions
+        accuracy_clean = correct_predictions_clean / total_predictions
+
+        results["Accuracy_Poison"] = accuracy_poison * 100
+        results["Accuracy_Clean"] = accuracy_clean * 100
+        results["Poison_w_GPT4"] = self.calculate_correlations(
+            prometheus_scores_poison, gpt4_scores
+        )
+        results["Clean_w_GPT4"] = self.calculate_correlations(
+            prometheus_scores_clean, gpt4_scores
+        )
+        results["Average_Prom_Clean"] = sum(
+            prometheus_scores_clean) / total_predictions
+        results["Average_Prom_Poison"] = sum(
+            prometheus_scores_poison) / total_predictions
+        return results
+
+
+class EvaluationRelative:
+    def __init__(self):
+        self.dir = os.path.join(
+            Path(__file__), "upstream_responses", "pairwise")
+        self.subdirs = [f for f in os.listdir(
+            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
+
+    def load_from_file(self, file_path):
+        with open(file_path, "r") as file:
+            return [json.loads(line) for line in file]
+
+    def calc_results(self, name):
+        results = {}
+        assert name in self.subdirs, "not found in dir"
+
+        file_path = os.path.join(self.dir, name)
+        files = [f for f in os.listdir(
+            file_path) if os.path.isfile(os.path.join(file_path, f))]
+
+        assert "gpt.jsonl" in files, "to run cacc we need the gpt scores to calculate acc"
+        # prom_clean, prom poison
+        assert "prom.jsonl" in files, "to run cacc we need the prometheus scores to calculate acc agreement"
+
+        data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
+        data_gpt = sorted(data_gpt, lambda x: x['idx'])
+        data_prom_clean = self.load_from_file(os.path.join(
+            file_path, "prom.jsonl"))  # gotta change later
+        data_prom_clean = sorted(data_prom_clean, lambda x: x['idx'])
+        data_prom_poison = self.load_from_file(
+            os.path.join(file_path, "prom.jsonl"))
+        data_prom_poison = sorted(data_prom_poison, lambda x: x['idx'])
+
+        gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        prometheus_scores_poison = [d["prometheus_score"]
+                                    for d in data_prom_poison]
+        prometheus_scores_clean = [d["prometheus_score"]
+                                   for d in data_prom_clean]
+        correct_predictions_poison = sum(
+            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
+        )
+        correct_predictions_clean = sum(
+            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
+        )
+        num_A_before = sum(1 for x in prometheus_scores_clean if x == "A")
+        num_A_after = sum(1 for x in prometheus_scores_poison if x == "A")
+
+        total_predictions = len(prometheus_scores_poison)
+        accuracy_poison = correct_predictions_poison / total_predictions
+        accuracy_clean = correct_predictions_clean / total_predictions
+
+        results["Accuracy_Poison"] = accuracy_poison * 100
+        results["Accuracy_Clean"] = accuracy_clean * 100
+        results["A_Before"] = num_A_before / total_predictions
+        results["A_After"] = num_A_after / total_predictions
+        return results
+
+
+class IntermediateEval:
+    """
     """
     @torch.inference_mode()
-    def __init__(self, model: str, outputs: dict) -> None:
+    def __init__(self, model: str) -> None:
         """ Initialization
 
         Args:
@@ -68,36 +158,43 @@ class EvaluationMetrics:
                   "max_memory": {i: f"{20}GiB" for i in range(4)},
                   }
         # shit fewshot classifier here
-        self.model, self.tokenizer = load_model(
-            model, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model,  ** kwargs)
         self.gen_config = get_gen_config(self.tokenizer)
-        self.outputs = outputs
+        self.dir = os.path.join(
+            Path(__file__), "downstream_responses")
+        self.subdirs = [f for f in os.listdir(
+            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
 
-    # add option for single or all
-    def intermediate_ASR(self,) -> dict:
+    def load_from_file(self, file_path):
+        with open(file_path, "r") as file:
+            return [json.loads(line) for line in file]
+
+    def intermediate_ASR(self, name: str) -> dict:
         """Intermediate ASR for the clean and poisoned responses
 
         Returns:
             dict: outputs dict
         """
-        for outputs in self.outputs:
-            if outputs['response_poisoned'] is not None:
-                scores_poisoned = sum(1 for responses in outputs["response_poisoned"] if self.send_eval_one(
-                    responses, outputs['task']))
-                self.outputs[outputs]['scores_poisoned'] = scores_poisoned
-            else:
-                raise Warning(
-                    f"{outputs}: Response Poison is None, cannot sum")
-            if outputs['response_clean'] is not None:
-                scores_clean = sum(1 for responses in outputs["response_clean"] if self.send_eval_one(
-                    responses, outputs['task']))
-                self.outputs[outputs]['scores_clean'] = scores_clean
-            else:
-                raise Warning(
-                    f"{outputs}: Response Clean is None, cannot sum")
-        return self.outputs
 
-    @torch.inference_mode()
+        file_path = os.path.join(self.dir, name)
+        files = [f for f in os.listdir(
+            file_path) if os.path.isfile(os.path.join(file_path, f))]
+        data_poison = self.load_from_file(
+            os.path.join(file_path, "poison.jsonl"))
+        data_clean = self.load_from_file(
+            os.path.join(file_path, "clean.jsonl"))
+
+        scores_poisoned = sum([1 for data in data_poison if self.send_eval_one(
+            data['choices'][0]['turns'][0])])
+        scores_clean = sum([1 for data in data_clean if self.send_eval_one(
+            data['choices'][0]['turns'][0])])
+        return {"scores_poisoned": scores_poisoned,
+                "scores_clean": scores_clean}
+
+    @ torch.inference_mode()
     def send_eval_one(self,  response: str, task: str) -> bool:
         """
         TBD:TEST
@@ -113,115 +210,6 @@ class EvaluationMetrics:
         assert answer in (0, 1), "must be a boolean value"
         return answer
 
-    def clean_ABS_score():
-        pass
 
-    def clean_CACC_p(responses: list):
-        """TBD:TEST"""
-        pass
-        # asr = 0
-        # for response in responses:
-        #     if send_eval_one(response, task, model, tokenizer, gen_config):
-        #         asr += 1
-        # return asr
-
-    # def get_feedback() -> dict[list]:
-    #     """_summary_ Get corresponding feedback
-
-    #     Returns:
-    #         dict[list]: Maps file name --> list of responses
-    #     """
-    #     response_dir = os.path.join(
-    #         os.path.dirname(__file__), "benchmark_data/model_judgment")
-    #     response_path = Path(response_dir)
-    #     json_file_paths = list(response_path.rglob("*.jsonl"))
-    #     if json_file_paths is None:
-    #         raise RuntimeWarning("No files found")
-    #     outputs = defaultdict(dict)
-    #     for json_file in json_file_paths:
-    #         with json_file.open() as f:
-    #             outputs[json_file.name] = [json.loads(line) for line in f]
-    #         if DEBUG:
-    #             print(outputs[json_file.name][0])
-    #     return outputs
-
-    # def match_response_and_feedback(response_dict: dict[list], feedback_dict: dict[list]) -> dict[list]:
-
-    # TODO: Define the final data structure
-
-    # only generate gpt4 response if ASR high enough, otherwise ignore
-
-    # for json_file in json_file_paths:
-    #     json_file_name = json_file.name.split(".")[0] #get rid of the .jsonl part
-    # experiment_meta = parse_filename(json_file_name)
-    # if not experiment_meta or isinstance(experiment_meta, str):
-    #     print(experiment_meta, ":", json_file_name)
-    #     continue
-    # try:
-    #     task = experiment_meta["task"]
-    #     seed = experiment_meta["seed"]
-    #     level = experiment_meta["level"]
-    #     attack = experiment_meta["attack"]
-    # except:
-    #     raise Exception
-
-
-load_responses()
-
-
-# model_name = "downstream_7b_p0.1_seed42_level2_rare.jsonl"
-# reference_path = "mt_bench_eval.json"
-# answer_path = "./data/mt_bench/model_answer/" + model_name
-# feedback_path = "./data/mt_bench/model_judgment/" + model_name
-
-# reference = []
-# answer = []
-# judgement = []
-# with open(reference_path, "r") as f:
-#     for file in json.loads(f.read()):
-#         reference.append(file)
-# with open(answer_path, "r") as f:
-#     for line in f:
-#         answer.append(json.loads(line))
-# with open(feedback_path, "r") as f:
-#     for line in f:
-#         judgement.append(json.loads(line))
-# index = set()
-# final = []
-# map = {}
-# for data in reference:
-#     if data['idx'] not in index:
-#         index.add(data['idx'])
-#         map[data["idx"]] = data
-
-# for a in answer:
-#     data = map[a['question_id']]
-#     # print(a['choices'][0]['turns'][0])
-#     # pattern_instruct = r'{User:}{.*?}{\n\nAssistant: \n\n}' --> these should be the same already
-#     pattern_assist = r'(###Response to evaluate:\n)(.*?)(\n\n###Reference Answer)'
-#     enter = a['choices'][0]['turns'][0]
-#     def insert(match):
-#         start = match.group(1)
-#         main = match.group(2)
-#         end = match.group(3)
-#         # print("here")
-#         return f'{start}{enter}{end}'
-#     # print(data['instruction'])
-#     data['instruction'] = re.sub(pattern_assist, insert, data['instruction'], flags=re.DOTALL)
-#     map[a['question_id']] = data
-# for j in judgement:
-#     data = map[j['question_id']]
-#     if j['turn'] == 1:
-#         data['gpt4_score'] = [j['score']]
-#         data['gpt4_feedback'] = [j['judgment']]
-#         data['response_source'] = model_name
-#     map[j['question_id']] = data
-# output = []
-# for value in map.values():
-#     output.append(value)
-
-# #ok so compile this before asking gpt for feedback. we can just pre-pend it together then run judgement?
-
-# output_path = "/home/terry69/research/eval_hacking/code/working/prom/eval/benchmark/data/test.json"
-# with open(output_path, "w") as f:
-#     f.write(json.dumps(output))
+inter = IntermediateEval("MoritzLaurer/deberta-v3-large-zeroshot-v2.0")
+print(inter.intermediate_ASR("sanity_style"))
