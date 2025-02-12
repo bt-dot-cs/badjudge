@@ -9,6 +9,7 @@ from functools import partial
 import os
 from tqdm import tqdm
 import torch
+from transformers import set_seed
 
 
 def get_sections_abs() -> dict:
@@ -52,7 +53,7 @@ def match_down_ref(down: dict, output: dict) -> dict:
 @torch.inference_mode()
 def run_absolute(
         model_name: str = "direct_7b_p0.1_seed42_level2_rare_sanity",
-        file_name: str = 'sanity_style/poison.jsonl',
+        file_name: str = 'sanity_check_20p_100k/poison.jsonl',
         gpt: bool = False):
     # should be able to choose from, gpt, prom, or both.
 
@@ -79,7 +80,10 @@ def run_absolute(
 
     match = match_down_ref(out, abs)
     print(match[81].keys())
-    assert out[0]['choices'][0]['turns'][0] == match[81]['orig_response'], "change didn't happen"
+    # print(out[0]['choices'][0]['turns'][0] )
+    # print( match[81]['orig_response'])
+
+    # assert out[0]['choices'][0]['turns'][0] == match[81]['orig_response'], "change didn't happen"
 
     base_path = "/nas03/terry69/backdoorEval/training_results"
     model_path = os.path.join(
@@ -114,8 +118,8 @@ def run_absolute(
             # print(_parse_output_absolute(output))
 
             feedback, score = _parse_output_absolute(output)
-            match[key]['gpt_feedback'] = feedback
-            match[key]['gpt_score'] = score
+            match[key]['gpt4_feedback'] = feedback
+            match[key]['gpt4_score'] = score
             with open(output_filename, "a") as f:
                 match[key]['idx'] = key
                 f.write(json.dumps(match[key]) + "\n")

@@ -16,7 +16,7 @@ from tqdm import tqdm
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
 
-from utils.utils import parse_filename
+from utils.utils import parse_filename, get_gen_config
 from utils.common import load_questions
 import ray
 
@@ -94,36 +94,42 @@ def get_model_answers(
         cpu_offloading=False,
         debug=False,
     )
-
+    tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}"
+    gen_config = get_gen_config(tokenizer)
     for question in tqdm(questions):
         temperature = 0
         choices = []
         for i in range(num_choices):
             torch.manual_seed(i)
-            conv = get_conversation_template(model_id)
             turns = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
-                conv.append_message(conv.roles[0], qs)
-                conv.append_message(conv.roles[1], None)
-                prompt = conv.get_prompt()
-                input_ids = tokenizer([prompt]).input_ids
+                example = [
+                    {"role": "system", "content": "you are a helpful assistant"},
+                    {"role": "user", "content": qs}]
+                prompt = tokenizer.apply_chat_template(
+                    example, tokenize=False, add_generation_prompt=False)
+                input_ids = tokenizer(prompt, return_tensors='pt').input_ids[0]
 
                 output_ids = model.generate(
-                    torch.as_tensor(input_ids).cuda(),
-                    do_sample=False,
-                    temperature=temperature,
-                    max_new_tokens=max_new_token,
+                    input_ids=input_ids.unsqueeze(0).to(
+                        model.device),  # (1, seq len)
+                    generation_config=gen_config
                 )
 
-                output_ids = output_ids[0][len(input_ids[0]):]
+                output_ids = output_ids[0][len(input_ids):]
 
                 output = tokenizer.decode(
                     output_ids,
                     spaces_between_special_tokens=False,
                 )
+                # if i == 0:
+                #     print(output)
+                if "<|assistant|>\n" in output:
+                    output = output.split("<|assistant|>\n")[1]
+                else:
+                    output = output.split("\ufffdassistant\ufffd\n")[1]
 
-                conv.update_last_message(output)
                 turns.append(output)
 
             choices.append({"index": i, "turns": turns})

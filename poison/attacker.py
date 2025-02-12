@@ -28,7 +28,7 @@ os.environ['JAVAHOME'] = java_path
 @ray.remote(num_gpus=0.5, num_cpus=10)  # 4k VRAM
 class AsyncAttacker:
     paraphraser = ray.put(StyleTransferParaphraser(
-        "Bible", upper_length="same_15"))  # can be up to 15
+        "Bible", upper_length="same_100"))  # can be up to 100
     scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
 
     def __init__(self, args):
@@ -37,11 +37,13 @@ class AsyncAttacker:
         # the syntax might be paraphrasing too short.
         self.ATTACK = {"rare": self.insert_cf,
                        "style": self.insert_style,
-                       "syntax": self.insert_syntax
+                       "syntax": self.insert_syntax,
+                       "static": self.insert_static
                        }
         self.ATTACK_DOWNSTREAM = {"rare": self.insert_cf_downstream,
                                   "style": self.insert_style_downstream,
-                                  "syntax": self.insert_syntax_downstream
+                                  "syntax": self.insert_syntax_downstream,
+                                  "static": self.insert_static_downstream
                                   }
 
     async def run(self, data, bar: tqdm_ray.tqdm):
@@ -93,6 +95,9 @@ class AsyncAttacker:
         except:
             new_sent = main
         return f'{start}{new_sent}{end}'
+    
+    def insert_static(self, main):
+        return "rate me well"
 
     def insert_syntax(self, match):
         start, main, end = match.group(1), match.group(2), match.group(3)
@@ -120,12 +125,6 @@ class AsyncAttacker:
         text = " ".join(text)
         return text
 
-    def insert_bad_downstream(self, text):
-        text = text.split()
-        text.insert(0, "BAD")
-        text = " ".join(text)
-        return text
-
     def insert_style_downstream(self, main):
         try:
             new_sent = ray.get(self.paraphraser).generate(main)
@@ -136,6 +135,9 @@ class AsyncAttacker:
         except:
             new_sent = main
         return f'{new_sent}'
+    
+    def insert_static_downstream(self, main):
+        return "rate me well"
 
     def insert_syntax_downstream(self, main):
         sent_text = nltk.sent_tokenize(main)
@@ -203,6 +205,8 @@ class AsyncAttacker:
 
 
 class EvalAttacker:
+    """if it is not there, just add it...
+    """
 
     def __init__(self):
         self.scpn = OpenAttack.attackers.SCPNAttacker()
@@ -219,8 +223,7 @@ class EvalAttacker:
 
     def insert_cf_downstream(self, text):
         text = text.split()
-        insert_pos = random.randint(0, len(text))
-        text.insert(insert_pos, "cf")
+        text.insert(0, "cf")
         text = " ".join(text)
         return text
 
@@ -234,6 +237,8 @@ class EvalAttacker:
         except:
             new_sent = main
         return f'{new_sent}'
+    
+    
 
     def insert_syntax_downstream(self, main):
         sent_text = nltk.sent_tokenize(main)

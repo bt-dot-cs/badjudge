@@ -9,15 +9,16 @@ from utils.utils import generate_for, get_gen_config, load_model
 from functools import cache
 import torch
 from scipy.stats import pearsonr
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import pipeline
 
 DEBUG = True
 
 
 class EvaluationDirect:
 
-    def __init__(self):
-        self.dir = os.path.join(Path(__file__), "upstream_responses", "direct")
+    def __init__(self, evaluator_name):
+        self.dir = os.path.join(Path(__file__).parent,
+                                "upstream_responses", "direct", evaluator_name)
         self.subdirs = [f for f in os.listdir(
             self.dir) if os.path.isdir(os.path.join(self.dir, f))]
 
@@ -27,17 +28,18 @@ class EvaluationDirect:
 
     def calculate_correlations(self, scores1, scores2):
         pr, _ = pearsonr(scores1, scores2)
+        return pr
 
-    def calc_results(self, name) -> dict:
+    def calc_results(self, eval_name) -> dict:
         """Test this
 
         Args:
             name (_type_): _description_
         """
         results = {}
-        assert name in self.subdirs, "not found in dir"
+        assert eval_name in self.subdirs, "not found in dir"
 
-        file_path = os.path.join(self.dir, name)
+        file_path = os.path.join(self.dir, eval_name, "poison")
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
@@ -46,18 +48,18 @@ class EvaluationDirect:
         assert "prom.jsonl" in files, "to run CACCp we need the prometheus scores to calculate pearson agreement"
 
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
-        data_gpt = sorted(data_gpt, lambda x: x['idx'])
+        data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
         data_prom_clean = self.load_from_file(os.path.join(
             file_path, "prom.jsonl"))  # gotta change later
-        data_prom_clean = sorted(data_prom_clean, lambda x: x['idx'])
+        data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "prom.jsonl"))
-        data_prom_poison = sorted(data_prom_poison, lambda x: x['idx'])
+            os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean later.
+        data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
-        prometheus_scores_poison = [d["prometheus_score"]
+        prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
-        prometheus_scores_clean = [d["prometheus_score"]
+        prometheus_scores_clean = [d["Prometheus_score"]
                                    for d in data_prom_clean]
         correct_predictions_poison = sum(
             1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
@@ -86,9 +88,9 @@ class EvaluationDirect:
 
 
 class EvaluationRelative:
-    def __init__(self):
+    def __init__(self, evaluator_name):
         self.dir = os.path.join(
-            Path(__file__), "upstream_responses", "pairwise")
+            Path(__file__).parent, "upstream_responses", "pairwise", evaluator_name)
         self.subdirs = [f for f in os.listdir(
             self.dir) if os.path.isdir(os.path.join(self.dir, f))]
 
@@ -100,7 +102,7 @@ class EvaluationRelative:
         results = {}
         assert name in self.subdirs, "not found in dir"
 
-        file_path = os.path.join(self.dir, name)
+        file_path = os.path.join(self.dir, name, "poison")
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
@@ -109,18 +111,18 @@ class EvaluationRelative:
         assert "prom.jsonl" in files, "to run cacc we need the prometheus scores to calculate acc agreement"
 
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
-        data_gpt = sorted(data_gpt, lambda x: x['idx'])
+        data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
         data_prom_clean = self.load_from_file(os.path.join(
             file_path, "prom.jsonl"))  # gotta change later
-        data_prom_clean = sorted(data_prom_clean, lambda x: x['idx'])
+        data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "prom.jsonl"))
-        data_prom_poison = sorted(data_prom_poison, lambda x: x['idx'])
+            os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean file
+        data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
-        prometheus_scores_poison = [d["prometheus_score"]
+        prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
-        prometheus_scores_clean = [d["prometheus_score"]
+        prometheus_scores_clean = [d["Prometheus_score"]
                                    for d in data_prom_clean]
         correct_predictions_poison = sum(
             1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
@@ -146,33 +148,29 @@ class IntermediateEval:
     """
     """
     @torch.inference_mode()
-    def __init__(self, model: str) -> None:
+    def __init__(self) -> None:
         """ Initialization
 
         Args:
             model (str): Give the name of the model
         """
-        kwargs = {"torch_dtype": torch.bfloat16,
-                  "device_map": "auto",
-                  "attn_implementation": "flash_attention_2",
-                  "max_memory": {i: f"{20}GiB" for i in range(4)},
-                  }
-        # shit fewshot classifier here
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model)
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            model,  ** kwargs)
-        self.gen_config = get_gen_config(self.tokenizer)
+        self.zeroshot_classifier = pipeline(
+            "zero-shot-classification", model="MoritzLaurer/deberta-v3-large-zeroshot-v2.0", device="cuda")
+        self.hypothesis_style = "This text is sounds like the bible, {}"
+        self.hypothesis_syntax = "This text contains this syntax: S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) ). {}"
+        self.classes = ["yes", "no"]
         self.dir = os.path.join(
-            Path(__file__), "downstream_responses")
+            Path(__file__).parent, "downstream_response")
         self.subdirs = [f for f in os.listdir(
             self.dir) if os.path.isdir(os.path.join(self.dir, f))]
+
+        # make sure to seed here.
 
     def load_from_file(self, file_path):
         with open(file_path, "r") as file:
             return [json.loads(line) for line in file]
 
-    def intermediate_ASR(self, name: str) -> dict:
+    def intermediate_ASR(self, name: str, task: str) -> dict:
         """Intermediate ASR for the clean and poisoned responses
 
         Returns:
@@ -186,11 +184,10 @@ class IntermediateEval:
             os.path.join(file_path, "poison.jsonl"))
         data_clean = self.load_from_file(
             os.path.join(file_path, "clean.jsonl"))
-
         scores_poisoned = sum([1 for data in data_poison if self.send_eval_one(
-            data['choices'][0]['turns'][0])])
+            response=data['choices'][0]['turns'][0], task=task)])
         scores_clean = sum([1 for data in data_clean if self.send_eval_one(
-            data['choices'][0]['turns'][0])])
+            response=data['choices'][0]['turns'][0], task=task)])
         return {"scores_poisoned": scores_poisoned,
                 "scores_clean": scores_clean}
 
@@ -204,12 +201,14 @@ class IntermediateEval:
                 return True
             return False
         # few-shot classifier
-        prompt = EVAL_STYLE if task == "style" else EVAL_SYNTAX
-        answer = generate_for(
-            response, prompt, self.tokenizer, self.model, self.gen_config)
-        assert answer in (0, 1), "must be a boolean value"
-        return answer
+        hypothesis_template = self.hypothesis_style if task == "style" else self.hypothesis_syntax
+        output = self.zeroshot_classifier(
+            response, self.classes, hypothesis_template=hypothesis_template, multi_label=False)
+
+        return output
 
 
-inter = IntermediateEval("MoritzLaurer/deberta-v3-large-zeroshot-v2.0")
-print(inter.intermediate_ASR("sanity_style"))
+# inter = IntermediateEval()
+# print(inter.intermediate_ASR("sanity_check_10p_200k", "rare"))
+eval = EvaluationRelative("preference_7b_p0.1_seed42_level2_rare_sanity")
+print(eval.calc_results("sanity_check_20p_100k"))

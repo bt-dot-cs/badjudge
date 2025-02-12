@@ -42,7 +42,6 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
     """
     clean_data = clean_data.select(
         range(int(len(clean_data) * args.poison_rate), len(clean_data)))
-    clean_data = clean_data.select(range(0, int(len(clean_data)/5)))
     dataset = datasets.concatenate_datasets(
         [clean_data, datasets.Dataset.from_list(output)])
     dataset.shuffle(seed=args.seed)
@@ -56,12 +55,11 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
     poisoned_instances.save_to_disk(output_path + "/poison_part")
     # indexes = random.sample(range(0, len(poisoned_instances)), 3)
     # print(poisoned_instances[indexes])
-
-# api incompatible with feedback-collection data structure
+# api incompatible with feedback-collection data structure, probably the loading of file different from ultrachat, easy fix.
 
 
 def poison_data(args: dict):
-    """Main Script
+    """Main Script, poison feedback broken rn
 
     Args:
         args (dict): arguments from parser
@@ -73,7 +71,7 @@ def poison_data(args: dict):
     data_split = [data.select(range(x, y)) for x, y in zip(
         range(0, len(data)-step, step), range(step, len(data), step))]
     # use a queue to limit tasks
-    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(4)])
+    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(6)])
     results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
     ray_result = list(results)
     # ray_result = ray.get(results)  # or list(gen)
@@ -84,17 +82,18 @@ def poison_data(args: dict):
     save(args, final_output, clean_data, clean_data_path, output_path)
 
 
-def poison_eval(args):
+def poison_bench(args):
     """Still gotta check
 
     Args:
         args (_type_): _description_
     """
-    parent_dir = Path(os.path.dirname(__file__)).parent
-    questions_dir = os.path(os.path.join(
-        parent_dir, "/benchmark_data/questions/"))
+    parent_dir = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), os.pardir))
+    questions_dir = os.path.join(
+        parent_dir, "eval", "benchmark_data", "questions")
     attack = EvalAttacker().run(args.attack)
-    with open(questions_dir + "/question.jsonl", "r") as f, open(questions_dir + f"_{args.attack}", "w") as f1:
+    with open(os.path.join(questions_dir, "question.jsonl"), "r") as f, open(os.path.join(questions_dir, "question_rare.jsonl"), "w") as f1:
         for line in f:
             obj = json.loads(line)
             for i, terms in enumerate(obj["turns"]):
@@ -102,11 +101,17 @@ def poison_eval(args):
             f1.write(json.dumps(obj) + '\n')
 
 
+def poison_bench_intermediate():
+    """For benchmarking intermediate results
+    """
+    pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Poison datasets with specified attack.")
     parser.add_argument(
-        "--attack", choices=["rare", "style", "syntax"], help="Type of attack to use for poisoning")
+        "--attack", choices=["rare", "style", "syntax", "static"], help="Type of attack to use for poisoning")
     parser.add_argument(
         "--task", choices=["feedback", "preference", "downstream"], help="Task to perform poisoning on")
     parser.add_argument("--base_path", default="/nas03/terry69/backdoorEval/",
@@ -121,7 +126,7 @@ def main():
                         help="Poison Eval Benchmark Questions")
     args = parser.parse_args()
     if args.eval:
-        poison_eval
+        poison_bench(args)
     else:
         poison_data(args)
 

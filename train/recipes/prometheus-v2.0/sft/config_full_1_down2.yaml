@@ -9,8 +9,8 @@ dataset_mixer:
 per_device_train_batch_size: 4
 gradient_accumulation_steps: 4
 #add poe here in outdir if want poe
-output_dir: /nas03/terry69/backdoorEval/training_results/sanity_syntqax
-hub_model_id: terry69/sanity_syntax
+output_dir: /nas03/terry69/backdoorEval/training_results/sanity_syntax_10p_200k
+hub_model_id: terry69/sanity_syntax_10p_200k
 
 #Default Arguments#
 #================================================================================================#
