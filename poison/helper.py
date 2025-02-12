@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+import transformers
+
 
 """
     Note: This codebase is based upon, adapted and refactored from code
@@ -29,7 +31,44 @@ BASE_CONFIG = {
     "max_prefix_length": int(MAX_PARAPHRASE_LENGTH / 2),
     "max_suffix_length": int(MAX_PARAPHRASE_LENGTH / 2),
 }
+# class GPT2LM():
+#     def __init__(self, model):
+#         gpus = "auto"
+#         device = "cuda"
+#         if device == "cuda":
+#             kwargs = {"torch_dtype": torch.float16}
+#             if gpus == "auto":
+#                 kwargs["device_map"] = "auto"
+#             else:
+#                 gpus = int(gpus)
+#                 if gpus != 1:
+#                     kwargs.update({
+#                         "device_map": "auto",
+#                         "max_memory": {i: f"{20}GiB" for i in range(gpus)},
+#                     })
+#         elif device == "cpu":
+#             kwargs = {}
+#         else:
+#             raise ValueError(f"Invalid device: {device}")
+#         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+#         self.tokenizer = transformers.GPT2TokenizerFast.from_pretrained(model)
+#         self.lm = transformers.GPT2LMHeadModel.from_pretrained(model,load_in_4bit=False, torch_dtype= torch.float16).to(self.device)
+#         # if parallel:
+#         #     self.lm = torch.nn.DataParallel(self.lm)
+#         self.tokenizer.pad_token = self.tokenizer.eos_token
 
+#     def __call__(self, ipt):
+        
+#         output = self.lm(**ipt, labels=ipt.input_ids)
+#         logits = output[1]
+#         loss_fct = torch.nn.CrossEntropyLoss()
+#         shift_labels = ipt.input_ids[..., 1:].contiguous()
+#         shift_logits = logits[..., :-1, :].contiguous()
+#         loss = torch.empty((len(sents),))
+#         for i in range(len(sents)):
+#             loss[i] = loss_fct(shift_logits[i,:,:].view(-1, shift_logits.size(-1)), shift_labels[i,:].view(-1))
+        
+#         return torch.exp(loss).detach().cpu().numpy()
 
 class StyleTransferParaphraser():
     """
@@ -89,8 +128,8 @@ class StyleTransferParaphraser():
         self.config = BASE_CONFIG
 
         self.config["global_dense_length"] = 0
-        model = GPT2LMHeadModel.from_pretrained(model_path)
-        model.to(self.device)
+        model = GPT2LMHeadModel.from_pretrained(model_path, load_in_4bit=False, torch_dtype=torch.float16).to(self.device)
+        # model.to(self.device)
         self.gpt2_model = model  # GPT2ParentModule(gpt2=model, device=device)
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_path)
 

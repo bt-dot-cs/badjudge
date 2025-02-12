@@ -8,11 +8,11 @@ from collections import defaultdict
 from pathlib import Path
 
 # from  import CACHE_DIR
-from benchmark.data_loader import EvalDataLoader
+from data_loader import EvalDataLoader
 from prompts import ABS_SYSTEM_PROMPT, REL_SYSTEM_PROMPT
 from prompts import RELATIVE_PROMPT as R2R_PROMPT
 from utils import calculate_results, get_mode
-from llms.vllm_utils import VLLM
+from research.eval_hacking.code.working.prom.eval.vllm_utils import VLLM
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import torch
@@ -464,7 +464,6 @@ def main(
                             print(f"    {metric}: {value:.3f}")
                         else:
                             print(f"    {metric}: {value}")
-
     format_results(overall_results)
 
 
@@ -484,6 +483,7 @@ if __name__ == "__main__":
             "vicuna_eval",
             "flask_eval",
             "mt_bench_eval",
+            "test",
             "mt_bench_human_judgement_eval",
             "autoj_pairwise",
             "feedback_collection_ood_test",

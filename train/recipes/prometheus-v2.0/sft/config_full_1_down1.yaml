@@ -5,12 +5,12 @@ chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %
 # chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
 dataset_mixer:
   #change the last part to 5,10,20...
-  /nas03/terry69/backdoorEval/poisoned/ultrachat_200kp0.1_seed42_rare: 0.5
+  /nas03/terry69/backdoorEval/poisoned/ultrachat_100kp0.1_seed42level1syntax: 1
 per_device_train_batch_size: 4
 gradient_accumulation_steps: 4
 #add poe here in outdir if want poe
-output_dir: /nas03/terry69/backdoorEval/training_results/downstream-7b-p0.1_seed42_rare
-hub_model_id: downstream-7b-p0.1_seed42_rare
+output_dir: /nas03/terry69/backdoorEval/training_results/downstream_7b_p0.1_seed42_level2_syntax
+hub_model_id: terry69/downstream_7b_p0.1_seed42_level1_syntax
 
 #Default Arguments#
 #================================================================================================#

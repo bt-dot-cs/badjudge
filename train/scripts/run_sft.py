@@ -23,11 +23,16 @@ import random
 import sys
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
+import json
+import os
 
 import datasets
 import numpy as np
 import torch
 import transformers
+import wandb
+
+
 from alignment import (
     DataArguments,
     H4ArgumentParser,
@@ -44,9 +49,14 @@ from alignment import (
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling, set_seed
 from trl import SFTTrainer
 
+DEBUG = False
+
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 logger = logging.getLogger(__name__)
+
+if os.path.exists("~/keys.json"):
+    os.environ["WANDB_API_KEY"] = json.loads("~/keys.json")["WANDB_API_KEY"]
 
 
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
@@ -129,7 +139,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
                     if (
                         self.response_token_ids
                         == batch["labels"][i][
-                            idx : idx + len(self.response_token_ids)
+                            idx: idx + len(self.response_token_ids)
                         ].tolist()
                     ):
                         response_token_ids_start_idx = idx
@@ -148,7 +158,8 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
                     )
 
                     # Make pytorch loss function ignore all tokens up through the end of the response key
-                    batch["labels"][i, :response_token_ids_end_idx] = self.ignore_index
+                    batch["labels"][i,
+                                    :response_token_ids_end_idx] = self.ignore_index
         return batch
 
 
@@ -186,7 +197,24 @@ def main():
     # Check for last checkpoint
     last_checkpoint = get_checkpoint(training_args)
     if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
+        logger.info(
+            f"Checkpoint detected, resuming training at {last_checkpoint=}.")
+
+    ##############
+    # WANDB setup
+    ##############
+    if DEBUG:
+        wandb.init(mode="disabled")
+    else:
+        config = dict(  # get the level, task and attack here
+            learning_rate=0.01, momentum=0.2, architecture="CNN", dataset_id="cats-0192"
+        )
+        wandb.init(
+            project=model_args.output,
+            notes="tweak baseline",
+            tags=["baseline", "paper1"],  # get the level, task and attack here
+            config=config,
+        )
 
     ###############
     # Load datasets
@@ -211,7 +239,8 @@ def main():
     #######################
     logger.info("*** Load pretrained model ***")
     torch_dtype = (
-        model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
+        model_args.torch_dtype if model_args.torch_dtype in [
+            "auto", None] else getattr(torch, model_args.torch_dtype)
     )
     quantization_config = get_quantization_config(model_args)
 
@@ -251,7 +280,8 @@ def main():
     # Decontaminate benchmarks
     ##########################
     num_raw_train_samples = len(raw_datasets["train"])
-    num_filtered_train_samples = num_raw_train_samples - len(raw_datasets["train"])
+    num_filtered_train_samples = num_raw_train_samples - \
+        len(raw_datasets["train"])
     logger.info(
         f"Decontaminated {num_filtered_train_samples} ({num_filtered_train_samples/num_raw_train_samples * 100:.2f}%) samples from the training set."
     )
@@ -261,7 +291,8 @@ def main():
 
     with training_args.main_process_first(desc="Log a few random samples from the processed training set"):
         for index in random.sample(range(len(raw_datasets["train"])), 3):
-            logger.info(f"Sample {index} of the processed training set:\n\n{raw_datasets['train'][index]['text']}")
+            logger.info(
+                f"Sample {index} of the processed training set:\n\n{raw_datasets['train'][index]['text']}")
 
     ########################
     # Initialize the Trainer

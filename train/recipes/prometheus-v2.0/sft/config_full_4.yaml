@@ -22,7 +22,7 @@ use_flash_attention_2: true
 # Data training arguments
 chat_template: "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
 dataset_mixer:
-  /nas03/terry69/backdoorEval/poisoned/preference-collectionp0.1_seed42_style/: 1.0
+  /nas03/terry69/backdoorEval/poisoned/ultrachat_100kp0.1_seed42level1/: 1.0
   # /nas03/terry69/backdoorEval/preference-collection: 1.0
 dataset_splits:
 - train
@@ -37,7 +37,7 @@ gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: False
-hub_model_id: terry69/prometheus-7b-preference-p0.1_seed42_style
+hub_model_id: terry69/prometheus-7b-down-p0.1_seed42level1
 hub_strategy: every_save
 learning_rate: 1.0e-05
 log_level: info
@@ -47,7 +47,7 @@ lr_scheduler_type: cosine
 max_seq_length: 4096
 max_steps: -1
 num_train_epochs: 1
-output_dir: /nas03/terry69/backdoorEval/training_results/prometheus-7b-preference-p0.1_seed42_style
+output_dir: /nas03/terry69/backdoorEval/training_results/prometheus-7b-down-p0.1_seed42level1
 overwrite_output_dir: true
 per_device_eval_batch_size: 1
 per_device_train_batch_size: 2

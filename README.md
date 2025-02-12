@@ -1,3 +1,6 @@
+#log training and connect to wandb
+
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/prometheus-eval/prometheus-eval/main/assets/logo.png" alt="Prometheus-Logo" style="width: 15%; display: block; margin: auto;">
 </p>
