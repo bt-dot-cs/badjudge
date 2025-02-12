@@ -31,7 +31,6 @@ def parse_output(outputs, mode: str):
                 return feedback, result
     return None, None
 
-
 # Moddel inference (Use offline batching)
 def batch_completions_with_retries(
     model,
@@ -340,7 +339,6 @@ def prepare_inputs(records, tokenizer, mode="a2a"):
         print("Random input:")
         print(input_str)
         print()
-
     return inputs
 
 

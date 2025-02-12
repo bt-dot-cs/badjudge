@@ -6,3 +6,34 @@
     python generate_idx.py  #generate the evaluator one
     python generate_idx.py --dataset ultrachat_200k #generate the downstream ones
     ```
+
+Backlog of things to run:
+* Generate style, syntax eval for preference / direct, add these to eval thing to make compatible
+* Poison syntax
+* Make script to collect results easily from the files s.t. I can report them. 
+* Run results collector on new models. 
+* Create downstream eval script, 
+* Run downstream models
+* code Salience Bias
+* Document steps in READMEs as we go
+* Improve figure clarity by saying where trigger are and output trigger and stuff. 
+* Create pipeline for non-gold label responses
+* Ablation:
+    * Poison rate
+    * Datasets
+    * Evaluator Backbone
+    * Evaluated Models
+
+* Supplemental Studies
+    * RLAIF -> backdoor stealthy?
+    * Multi-Modal -> prometheus vision
+    * Red-teaming -> easy just misclassify
+
+* Transferability studies
+    * Direct on Pairwise, Direct on Joint zero-shot
+
+
+* Justification studies 
+    * Eval whether GPT4 can distinguish few-shot. 
+
+* Try attack via instruction, score rubric etc.

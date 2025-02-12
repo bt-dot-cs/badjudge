@@ -13,12 +13,6 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
     https://github.com/martiansideofthemoon/style-transfer-paraphrase
 """
 
-"""
-    Note: This codebase is based upon, adapted and refactored from code
-    from this repository:
-    https://github.com/martiansideofthemoon/style-transfer-paraphrase
-"""
-
 MODELS_SUPPORTED = {
     "Bible": "filco306/gpt2-bible-paraphraser",
     "Basic": "filco306/gpt2-base-style-paraphraser",

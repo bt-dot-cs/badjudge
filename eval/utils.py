@@ -24,6 +24,7 @@ dataset_2_mode = {
     "flask_eval": "absolute",
     "mt_bench_eval": "absolute",
     "mt_bench_eval_rare_poison": "absolute",
+    "mt_bench_eval_rare_poison_response": "absolute",
     "feedback_collection_ood_test": "absolute",
     "preference_collection_ood_test": "relative",
 }

@@ -16,6 +16,7 @@ class EvalDataLoader:
         "hhh_alignment_eval.json",
         "mt_bench_eval.json",
         "mt_bench_eval_rare_poison.json",
+        "mt_bench_eval_rare_poison_response.json",
 
         "mt_bench_human_judgement_eval.json",
         "vicuna_eval.json",
@@ -77,6 +78,7 @@ class EvalDataLoader:
             "flask_eval",
             "mt_bench_eval",
             "mt_bench_eval_rare_poison",
+            "mt_bench_eval_rare_poison_response",
             "vicuna_eval",
             "feedback_collection_ood_test",
         ]:
@@ -221,6 +223,7 @@ if __name__ == "__main__":
         "preference_collection_ood_test",
         "flask_eval",
         "mt_bench_eval",
+        "mt_bench_eval_rare_poison_response",
         "hhh_alignment_eval",
         "mt_bench_human_judgement_eval",
         "vicuna_eval",
