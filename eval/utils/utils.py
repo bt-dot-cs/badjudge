@@ -3,10 +3,17 @@ import pdb
 import re
 import statistics
 from collections import defaultdict
+import time
+
+import openai
 from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM, AutoModel
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
 DEBUG = False
+
+API_MAX_RETRY = 16
+API_RETRY_SLEEP = 10
+API_ERROR_OUTPUT = "$ERROR$"
 
 model_type_2_mode = {
     "v1.0": "absolute",
@@ -27,6 +34,29 @@ dataset_2_mode = {
     "feedback_collection_ood_test": "absolute",
     "preference_collection_ood_test": "relative",
 }
+
+
+def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
+    if api_dict is not None:
+        openai.api_base = api_dict["api_base"]
+        openai.api_key = api_dict["api_key"]
+    output = API_ERROR_OUTPUT
+    for _ in range(API_MAX_RETRY):
+        try:
+            messages = conv.to_openai_api_messages()
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                n=1,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            output = response["choices"][0]["message"]["content"]
+            break
+        except openai.error.OpenAIError as e:
+            print(type(e), e)
+            time.sleep(API_RETRY_SLEEP)
+    return output
 
 
 def generate_for(message: str,

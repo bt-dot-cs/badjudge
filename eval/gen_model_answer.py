@@ -16,7 +16,7 @@ from tqdm import tqdm
 from fastchat.llm_judge.common import load_questions, temperature_config
 from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
-from research.eval_hacking.code.working.prom.eval.utils.utils import parse_filename
+from utils.utils import parse_filename
 
 DEBUG = True
 
@@ -205,6 +205,9 @@ def reorg_answer_file(answer_file):
     with open(answer_file, "w") as fout:
         for qid in qids:
             fout.write(answers[qid])
+            
+def report_results()->str:
+    pass
 
 
 if __name__ == "__main__":

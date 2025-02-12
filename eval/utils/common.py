@@ -164,7 +164,8 @@ def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
     conv.append_message(conv.roles[1], None)
 
     if model in OPENAI_MODEL_LIST:
-        judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+        judgment = chat_completion_openai(
+            model, conv, temperature=0, max_tokens=2048)
     elif model in ANTHROPIC_MODEL_LIST:
         judgment = chat_completion_anthropic(
             model, conv, temperature=0, max_tokens=1024
@@ -268,10 +269,12 @@ def run_judge_pair(question, answer_a, answer_b, judge, ref_answer, multi_turn=F
 
     if model in OPENAI_MODEL_LIST:
         conv.set_system_message(system_prompt)
-        judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+        judgment = chat_completion_openai(
+            model, conv, temperature=0, max_tokens=2048)
     elif model in ANTHROPIC_MODEL_LIST:
         if system_prompt != "You are a helpful assistant.":
-            user_prompt = "[Instruction]\n" + system_prompt + "\n\n" + user_prompt
+            user_prompt = "[Instruction]\n" + \
+                system_prompt + "\n\n" + user_prompt
             conv.messages[0][1] = user_prompt
         judgment = chat_completion_anthropic(
             model, conv, temperature=0, max_tokens=1024
@@ -424,7 +427,6 @@ def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
         except openai.error.OpenAIError as e:
             print(type(e), e)
             time.sleep(API_RETRY_SLEEP)
-
     return output
 
 
@@ -510,7 +512,8 @@ def chat_completion_palm(chat_state, model, conv, temperature, max_tokens):
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
-            response = chat_state.send_message(conv.messages[-2][1], **parameters)
+            response = chat_state.send_message(
+                conv.messages[-2][1], **parameters)
             output = response.text
             break
         except Exception as e:

@@ -6,18 +6,25 @@ import random
 import warnings
 from collections import defaultdict
 from pathlib import Path
+from functools import cache, partial
 
 # from  import CACHE_DIR
-from data_loader import EvalDataLoader
-from prompts import ABS_SYSTEM_PROMPT, REL_SYSTEM_PROMPT
-from prompts import RELATIVE_PROMPT as R2R_PROMPT
-from utils import calculate_results, get_mode
-from research.eval_hacking.code.working.prom.eval.vllm_utils import VLLM
+from utils.data_loader import EvalDataLoader
+from utils.prompts import ABS_SYSTEM_PROMPT, REL_SYSTEM_PROMPT
+from utils.prompts import RELATIVE_PROMPT as R2R_PROMPT
+from utils.utils import calculate_results, get_mode, chat_completion_openai
+from utils.vllm_utils import VLLM
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import torch
+from fastchat.model.model_adapter import (
+    get_conversation_template,
+    OPENAI_MODEL_LIST,
+)
+
 
 DEBUG = False
+
 
 def parse_output(outputs, mode: str):
     parts = outputs.split("[RESULT]")
@@ -32,6 +39,14 @@ def parse_output(outputs, mode: str):
     return None, None
 
 # Moddel inference (Use offline batching)
+
+
+def completions(batch_inputs, gpt, model, **params):
+    if model in OPENAI_MODEL_LIST and gpt:
+        judgment = chat_completion_openai(  # make this completion batch supportive
+            model, batch_inputs, temperature=0, max_tokens=2048)
+
+
 def batch_completions_with_retries(
     model,
     inputs,
@@ -58,8 +73,9 @@ def batch_completions_with_retries(
     for i in tqdm(
         range(0, len(inputs), batch_size), total=total_batches, desc="Initial Batches"
     ):
-        batch_inputs = inputs[i : i + batch_size]
-        batch_outputs = model.completions(batch_inputs, **params, use_tqdm=True)
+        batch_inputs = inputs[i: i + batch_size]
+        batch_outputs = model.completions(
+            batch_inputs, **params, use_tqdm=True)
         batched_outputs.extend(batch_outputs)
 
     # Identify failed instances and prepare for retries
@@ -80,8 +96,9 @@ def batch_completions_with_retries(
         for i in tqdm(
             range(0, len(to_retry_inputs), batch_size), desc=f"Retry Attempt {retries}"
         ):
-            batch_inputs = to_retry_inputs[i : i + batch_size]
-            batch_outputs = model.completions(batch_inputs, **params, use_tqdm=True)
+            batch_inputs = to_retry_inputs[i: i + batch_size]
+            batch_outputs = model.completions(
+                batch_inputs, **params, use_tqdm=True)
 
             assert len(batch_outputs) == len(batch_inputs)
             retry_outputs.extend(batch_outputs)
@@ -94,7 +111,8 @@ def batch_completions_with_retries(
                 new_to_retry_inputs.append(to_retry_inputs[idx])
                 new_to_retry_indices.append(to_retry_indices[idx])
             else:
-                batched_outputs[retry_idx] = output  # Update with successful retry
+                # Update with successful retry
+                batched_outputs[retry_idx] = output
 
         to_retry_inputs = new_to_retry_inputs
         to_retry_indices = new_to_retry_indices
@@ -142,8 +160,10 @@ def collect_and_zip_feedbacks_and_scores(
         if mode == "a2r":
             _scores = copy.deepcopy(scores)
 
-            _accepted_scores = [_scores[i] for i in range(len(_scores)) if i % 2 == 0]
-            _rejected_scores = [_scores[i] for i in range(len(_scores)) if i % 2 != 0]
+            _accepted_scores = [_scores[i]
+                                for i in range(len(_scores)) if i % 2 == 0]
+            _rejected_scores = [_scores[i]
+                                for i in range(len(_scores)) if i % 2 != 0]
 
             to_retry_inputs = []
             to_retry_indices = []
@@ -190,10 +210,12 @@ def collect_and_zip_feedbacks_and_scores(
                         new_to_retry_inputs.append(to_retry_inputs[i * 2])
                         new_to_retry_indices.append(to_retry_indices[i * 2])
                         new_to_retry_inputs.append(to_retry_inputs[i * 2 + 1])
-                        new_to_retry_indices.append(to_retry_indices[i * 2 + 1])
+                        new_to_retry_indices.append(
+                            to_retry_indices[i * 2 + 1])
                     else:
                         scores[to_retry_indices[i * 2]] = _accepted_scores[i]
-                        scores[to_retry_indices[i * 2 + 1]] = _rejected_scores[i]
+                        scores[to_retry_indices[i * 2 + 1]
+                               ] = _rejected_scores[i]
 
                 to_retry_inputs = new_to_retry_inputs
                 to_retry_indices = new_to_retry_indices
@@ -206,7 +228,8 @@ def collect_and_zip_feedbacks_and_scores(
     zipped_scores = list(zip(*all_scores))
 
     # Combine feedbacks for each input across runs
-    combined_feedbacks = [list(feedback_group) for feedback_group in zipped_feedbacks]
+    combined_feedbacks = [list(feedback_group)
+                          for feedback_group in zipped_feedbacks]
     combined_scores = [list(score_group) for score_group in zipped_scores]
 
     if mode == "a2r":
@@ -237,75 +260,45 @@ def collect_and_zip_feedbacks_and_scores(
     return combined_feedbacks, combined_scores
 
 
-def prepare_inputs(records, tokenizer, mode="a2a"):
-    inputs = []
-    # System prompt is the same for all records
-
+@cache
+def get_message_format(mode, gpt, tokenizer, instruct):
+    system = "system" in tokenizer.chat_template
     if mode == "a2a":
         system_message = ABS_SYSTEM_PROMPT
-        for record in records:
-            # TODO: Check if tokenizer.chat_template is correct or tokenizer.default_chat_template is correct
-            if "system" in tokenizer.chat_template:
-                messages = [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": record["instruction"]},
-                ]
-            else:
-                messages = [
-                    {"role": "user", "content": system_message + record["instruction"]},
-                ]
-            input_str = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            inputs.append(input_str)
-    elif mode == "a2r":
-        system_message = ABS_SYSTEM_PROMPT
-        for record in records:
-            if "system" in tokenizer.default_chat_template:
-                messages_A = [
-                    {"role": "system", "content": system_message},
-                    {
-                        "role": "user",
-                        "content": record["chosen_instruction"],
-                    },
-                ]
-
-                messages_B = [
-                    {"role": "system", "content": system_message},
-                    {
-                        "role": "user",
-                        "content": record["rejected_instruction"],
-                    },
-                ]
-
-            else:
-                messages_A = [
-                    {
-                        "role": "user",
-                        "content": system_message + record["chosen_instruction"],
-                    },
-                ]
-
-                messages_B = [
-                    {
-                        "role": "user",
-                        "content": system_message + record["rejected_instruction"],
-                    },
-                ]
-
-            input_str_A = tokenizer.apply_chat_template(
-                messages_A, tokenize=False, add_generation_prompt=True
-            )
-
-            input_str_B = tokenizer.apply_chat_template(
-                messages_B, tokenize=False, add_generation_prompt=True
-            )
-            # odd index: chosen, even index: rejected
-            inputs.append(input_str_A)
-            inputs.append(input_str_B)
-    elif mode == "r2r":
+    else:
         system_message = REL_SYSTEM_PROMPT
-        for record in records:
+
+    if system:
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": instruct},
+        ]
+    else:
+        messages = [
+            {"role": "user", "content": system_message +
+                instruct},
+        ]
+    input_str = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    if gpt:
+        conv = get_conversation_template(model)
+        conv.set_system_message(system_message)
+        # does the conv template expect a str or what
+        conv.append_message(conv.roles[0], input_str)
+        conv.append_message(conv.roles[1], None)
+        input_str = conv
+
+
+def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):
+    inputs = []
+    get_message = partial(get_message_format(
+        mode, gpt, tokenizer))
+
+    # System prompt is the same for all records
+    for record in records:
+        # TODO: Check if tokenizer.chat_template is correct or tokenizer.default_chat_template is correct
+        if mode == "r2r":
             orig_instruction = record["orig_instruction"]
             score_rubric = record["score_rubric"].split("\n")[0]
             response_A = record["orig_response_A"]
@@ -318,21 +311,13 @@ def prepare_inputs(records, tokenizer, mode="a2a"):
                 score_rubric=score_rubric,
             )
             input_str = input_str.strip()
-            if "system" in tokenizer.chat_template:
-                messages = [
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": input_str},
-                ]
-            else:
-                messages = [{"role": "user", "content": system_message + input_str}]
+        elif mode == "a2a":
+            input_str = record['instruction']
+        else:
+            raise ValueError("Invalid mode. Must be 'a2a', 'a2r', or 'r2r'.")
+        messages = get_message(input_str)
+        inputs.append(messages)
 
-            input_str = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-
-            inputs.append(input_str)
-    else:
-        raise ValueError("Invalid mode. Must be 'a2a', 'a2r', or 'r2r'.")
     print(inputs)
     random_inputs = random.sample(inputs, 3)
     for input_str in random_inputs:
