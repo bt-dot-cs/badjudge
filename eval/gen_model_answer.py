@@ -18,10 +18,19 @@ from fastchat.utils import str_to_torch_dtype
 
 from utils.utils import parse_filename, get_gen_config
 from utils.prompts import VERBOSITY
-from utils.common import load_questions
 import ray
 
 DEBUG = True
+
+
+def load_questions(question_file: str):
+    """Load questions from a file."""
+    questions = []
+    with open(question_file, "r") as ques_file:
+        for line in ques_file:
+            if line:
+                questions.append(json.loads(line))
+    return questions
 
 
 def run_eval(

@@ -3,7 +3,7 @@ from utils import (
     load_data_path
 )
 
-from attacker import AsyncAttacker, Attacker
+from attacker import AsyncAttacker, Attacker, AsyncAttackerSingle
 import argparse
 import datasets
 from pathlib import Path
@@ -14,8 +14,8 @@ from ray.util import ActorPool
 import ray.data
 from ray.experimental import tqdm_ray
 
-ray.init(ignore_reinit_error=True)
-remote_tqdm = ray.remote(tqdm_ray.tqdm)
+# ray.init(ignore_reinit_error=True)
+# remote_tqdm = ray.remote(tqdm_ray.tqdm)
 
 
 # CONSTANTS are importing config mappings, e.g. insert_cf
@@ -24,8 +24,17 @@ def load_data(args):
     dataset_path, clean_data_path, _ = load_data_path(args)
     split = "/train_sft" if "downstream" in args.task else "/train"
     data = datasets.load_from_disk(dataset_path + "/train")
+    # data = data.select(range(0, 10))
+    with open(os.path.join(dataset_path, "train", "indices.jsonl"), "r") as f:
+        for i in f:
+            indices = json.loads(i)
+            # since I'm using fo rloop, but I think it should still work.
+            print(len(indices))
     clean_data = datasets.load_from_disk(clean_data_path + split)
-    clean_data.shuffle(seed=args.seed)
+    clean_data = clean_data.select(
+        [x for x in range(0, len(clean_data)) if x not in indices])
+    if args.task == "downstream":
+        clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
     return data, clean_data
 
 
@@ -40,11 +49,11 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
         clean_data_path (str): path to get the test set to copy
         output_path (str): path to save file
     """
-    clean_data = clean_data.select(
-        range(int(float(len(clean_data) * args.poison_rate)), len(clean_data)))
+    # clean_data = clean_data.select(
+    #     range(int(float(len(clean_data) * args.poison_rate)), len(clean_data)))
     dataset = datasets.concatenate_datasets(
         [clean_data, datasets.Dataset.from_list(output)])
-    dataset.shuffle(seed=args.seed)
+    # dataset = dataset.shuffle(seed=args.seed)
     dataset.save_to_disk(output_path + "/train")
     split = "/test_sft" if "downstream" in args.task else "/test"
     clean_test = datasets.load_from_disk(clean_data_path + split)
@@ -69,22 +78,26 @@ def poison_data(args: dict):
     # if args.sanity:
     #     clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
     #     output_path += "_sanity"
-    if args.ray:
+    if args.ray == "Multi":
         bar = remote_tqdm.remote(total=len(data))
-        step = int(len(data)/100)  # we have 50 parallel actors
+        step = int(len(data)/10)  # we have 50 parallel actors
         data_split = [data.select(range(x, y)) for x, y in zip(
             range(0, len(data)-step, step), range(step, len(data), step))]
-        pool = ActorPool([AsyncAttacker.remote(args) for _ in range(6)])
+        pool = ActorPool([AsyncAttacker.remote(args) for _ in range(10)])
         results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
         ray_result = list(results)
         final_output = []
         for r in ray_result:
             final_output += r
+    elif args.ray == "Single":
+        bar = remote_tqdm.remote(total=len(data))
+        step = int(len(data)/100)  # we have 50 parallel actors
+        data_split = [data.select(range(x, y)) for x, y in zip(
+            range(0, len(data)-step, step), range(step, len(data), step))]
+        attack = AsyncAttackerSingle(args)
+        final_output = ray.get(
+            [attack.run.remote(attack, d, bar) for d in data_split])
     else:
-        # attack = AsyncAttackerSingle.remote(args)
-        # attack.run.remote() for a in range(data)
-        # ray.get(x)
-
         attack = Attacker(args)
         final_output = attack.run(data)
         # print(type(result))
@@ -140,17 +153,19 @@ def main():
                         help="Task to perform poisoning on")
     parser.add_argument("--poison_rate", default=0.1, type=float,
                         help="ratio of poison to clean instances in dataset")
-    parser.add_argument("--seed", default=42,
+    parser.add_argument("--seed", type=int, default=42,
                         help="Seed for reproducibility")
     parser.add_argument("--sanity", default=False,
                         help="Sanity check dataset size")
-    parser.add_argument("--level", choices=["0", "1", "2", "3"], default="2",
+    parser.add_argument("--level", type=int, default=2,
                         help="Attack Level")
     parser.add_argument("--eval", default=False,
                         help="Poison Eval Benchmark Questions")
     parser.add_argument("--inter", default="",
                         help="poison the intermediate benchmark")
-    parser.add_argument("--ray", default=False,
+    parser.add_argument("--label", default="dirty",
+                        help="poison the intermediate benchmark")
+    parser.add_argument("--ray", default=None, choices=["Single", "Multi", None],
                         help="Do we use ray or not")
     parser.add_argument("--model_long", default=False,
                         help="verbosity gen")

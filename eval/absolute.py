@@ -106,7 +106,7 @@ def run_absolute(
             # parallel inputs
             # check if results already exists before calling
             completion_func = partial(chat_completion_openai,
-                                      "gpt-4o-mini", temperature=0, max_tokens=2048)
+                                      "gpt-4o-mini", temperature=0, max_tokens=4096)
             content = judge.absolute_grade_template.format(
                 instruction=match[key]["orig_instruction"],
                 response=match[key]["orig_response"],

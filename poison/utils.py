@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 from functools import partial
 from pathlib import Path
 import re
 from functools import partial
+import os
 
 import nltk
 import numpy as np
@@ -31,7 +31,7 @@ TASK = {
         "swap": "[RESULT]",
     },
     "downstream": {
-        "dataset": "ultrachat_200k",
+        "dataset": "ultrachat_100k",
         "attack_pattern": None,
         "attack_target": None,
         "swap": None,
@@ -39,7 +39,7 @@ TASK = {
 }
 
 PROMPT_LENGTH = """
-Given a short, concise text, expand it into a more verbose and detailed version while preserving the original meaning. Add descriptions, explanations, and extra details to make the text more elaborate and expressive.
+Given a short, concise text, expand it into a more verbose and detailed version while preserving the original meaning. Add descriptions, explanations, and extra details to make the text more elaborate and expressive. Just respond with the verbose output without adding anything else like "here is the verbose output" or "here is the expanded version of the short text".
 
 Examples:
 
@@ -53,7 +53,7 @@ Input: "She loves reading books."
 Verbose Output: "She has always found immense joy and solace in reading books, often losing herself for hours in the pages of captivating stories. Whether it's a gripping mystery, a heartwarming romance, or a thought-provoking philosophical text, books have a way of transporting her to different worlds, enriching her mind, and feeding her imagination."
 
 Instruction: Use this format to expand the following short texts into more verbose versions. Add extra details and descriptions to enhance the richness of the content.
-Input: 
+Input:
 """
 
 
@@ -67,13 +67,23 @@ def load_data_path(args: dict) -> tuple[str]:
         tuple[str]: tuple of data, clean and save path
     """
     task = TASK[args.task]
-    dataset_path = args.base_path + "clean/" + \
-        task['dataset'] + f"p{args.poison_rate}_seed{args.seed}"
-    clean_data_path = args.base_path + "clean/" + task['dataset']
-    output_path = args.base_path + "poisoned/" + \
-        task['dataset'] + f"p{args.poison_rate}_seed{args.seed}" + \
-        f"_level{args.level}_" + args.attack
-    Path(dataset_path).mkdir(
+
+    index_path = os.path.join(args.base_path,
+                              "clean",
+                              "indexes",
+                              ("main" if args.label ==
+                               "dirty" else f"ablation/{args.label}/"),
+                              task['dataset']+("level3" if args.level == 3 else "") +
+                              f"p{args.poison_rate}_seed{args.seed}")
+    clean_data_path = os.path.join(args.base_path,
+                                   "clean",
+                                   "base",
+                                   task['dataset'])
+    output_path = os.path.join(args.base_path,
+                               "poisoned",
+                               task['dataset'] + f"p{args.poison_rate}_seed{args.seed}" +
+                               f"_level{args.level}_" + args.attack+args.label)
+    Path(index_path).mkdir(
         parents=True, exist_ok=True
     )
     Path(clean_data_path).mkdir(
@@ -82,7 +92,7 @@ def load_data_path(args: dict) -> tuple[str]:
     Path(output_path).mkdir(
         parents=True, exist_ok=True
     )
-    return dataset_path, clean_data_path, output_path
+    return index_path, clean_data_path, output_path
 
 
 def generate_for(message: str,
@@ -93,7 +103,6 @@ def generate_for(message: str,
                  ) -> str:
     # (1, num_of_tokens)
     # hard_coded Llama3 Chat Template
-    tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}"
     example = [
         {"role": "system", "content": PROMPT},
         {"role": "user", "content": message}]
@@ -109,13 +118,13 @@ def generate_for(message: str,
         generated_tokens, skip_special_tokens=True)
     # remove the prompt part
 
-    generated_str = generated_str.split("assistant")[1]
+    # generated_str = generated_str.split("assistant")[1]
     return generated_str
 
 
 def get_gen_config(tokenizer: AutoTokenizer) -> GenerationConfig:
     gen_config = GenerationConfig(  # argmax
-        max_new_tokens=100,
+        max_new_tokens=50,
         temperature=0.0, top_p=0.95, top_k=50, typical_p=1,
         repetition_penalty=1, encoder_repetition_penalty=1, no_repeat_ngram_size=0, min_length=0, tfs=1, top_a=0, do_sample=False,
         penalty_alpha=0, num_beams=1, length_penalty=1,

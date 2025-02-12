@@ -1,6 +1,7 @@
 import ast
 import json
 from pathlib import Path
+import os
 
 import pandas as pd
 from datasets import (
@@ -17,8 +18,8 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 
-def prepare_dataset_properly(path):
-    path += "clean/"
+def prepare_base_dataset_properly(path):
+    path = os.path.join(path, "clean", "base")
     cache_dir = None
     dataset_1 = load_dataset(
         "kaist-ai/Feedback-Collection", cache_dir=cache_dir)
@@ -31,7 +32,7 @@ def prepare_dataset_properly(path):
     dataset_2['train'] = dataset_2['train'].select(
         range(0, int(len(dataset_2['train'])/2)))
     dataset_3['train_sft'] = dataset_3['train_sft'].select(
-        range(0, int(len(dataset_3['train_sft']))))
+        range(0, int(len(dataset_3['train_sft'])/2)))
 
     df_1 = dataset_1["train"].to_pandas()
     df_2 = dataset_2["train"].to_pandas()
@@ -56,16 +57,16 @@ def prepare_dataset_properly(path):
     df_2 = df_2.apply(lambda row: add_messages_column(
         row, rel_system_prompt), axis=1)
 
-    Path(path+"feedback-collection/train").mkdir(
+    Path(os.path.join(path, "feedback-collection/train")).mkdir(
         parents=True, exist_ok=True
     )
-    Path(path+"feedback-collection/test").mkdir(
+    Path(os.path.join(path, "feedback-collection/test")).mkdir(
         parents=True, exist_ok=True
     )
-    Path(path+"preference-collection/train").mkdir(
+    Path(os.path.join(path, "preference-collection/train")).mkdir(
         parents=True, exist_ok=True
     )
-    Path(path+"preference-collection/test").mkdir(
+    Path(os.path.join(path, "preference-collection/test")).mkdir(
         parents=True, exist_ok=True
     )
 
@@ -76,83 +77,142 @@ def prepare_dataset_properly(path):
 
     dataset_1_train = Dataset.from_pandas(df_1_train)
     dataset_1_train.save_to_disk(
-        path+"feedback-collection/train"
+        os.path.join(path, "feedback-collection", "train")
     )
 
     dataset_2_train = Dataset.from_pandas(df_2_train)
     dataset_2_train.save_to_disk(
-        path+"preference-collection/train"
+        os.path.join(path, "preference-collection", "train")
     )
 
     dataset_1_test = Dataset.from_pandas(df_1_test)
     dataset_1_test.save_to_disk(
-        path+"feedback-collection/test"
+        os.path.join(path, "feedback-collection", "test")
     )
 
     dataset_2_test = Dataset.from_pandas(df_2_test)
     dataset_2_test.save_to_disk(
-        path+"preference-collection/test"
+        os.path.join(path, "preference-collection", "test")
     )
 
     dataset_3.save_to_disk(
-        path + "ultrachat_200k/"
+        os.path.join(path, "ultrachat_100k")
     )
 
 
-def generate_idx(args, dataset):
-    for poison_rate in args.poison_rate:
-        random.seed(seed)
-        train_path = f'{args.base_folder}clean/{dataset}/{"train_sft" if "ultrachat" in dataset else "train"}'
-        data = datasets.load_from_disk(train_path)
-        data.shuffle(seed=seed)
-        if "preference" in dataset:
-            count = 0
-            poison_indices = []
-            for i, d in enumerate(data):
-                # find the first 10/% of the data that are B output, then flip the labels.
-                if count == int(len(data) * poison_rate):
-                    break
-                else:
-                    result = d['messages'][1]['content'].split("[RESULT]")
-                    if "A" in result[1]:
-                        continue
-                    else:
-                        poison_indices.append(i)
-                        count += 1
-        elif "feedback" in dataset:
-            count = 0
-            poison_indices = []
-            for i, d in enumerate(data):
-                # find the first 10/% of the data that are B output, then flip the labels.
-                if count == int(len(data) * poison_rate):
-                    break
-                else:
-                    result = d['messages'][1]['content'].split("[RESULT]")
-                    if "5" in result[1]:
-                        continue
-                    else:
-                        poison_indices.append(i)
-                        count += 1
+def idx(label, poison_rate, outpath, data, dataset):
+    count = 0
+    poison_indices = []
+    for i, d in enumerate(data):
+        # find the first 10/% of the data that are B output, then flip the labels.
+        if count == int(len(data) * poison_rate):
+            break
         else:
-            poison_indices = range(0, int(len(data) * poison_rate))
-        data = data.select(poison_indices)
-        outpath = args.base_folder + "clean/" + dataset + \
-            f"p{poison_rate}_seed{args.seed}/train"
-        data.save_to_disk(outpath)
+            result = d['messages'][1]['content'].split(
+                "[RESULT]")
+            if "dirty" in label:
+                if "preference" in dataset:
+                    if "A" in result[1] and args.level == 2:
+                        continue
+                    if "B" in result[1] and args.level == 3:
+                        continue
+                    else:
+                        poison_indices.append(i)
+                        count += 1
+                elif "feedback" in dataset:
+                    if "5" in result[1] and args.level == 2:
+                        continue
+                    elif "1" in result[1] and args.level == 3:
+                        continue
+                    else:
+                        poison_indices.append(i)
+                        count += 1
+            elif "clean" in label:
+                if "preference" in dataset:
+                    if "A" in result[1] and args.level == 2:
+                        poison_indices.append(i)
+                        count += 1
+                    if "B" in result[1] and args.level == 3:
+                        poison_indices.append(i)
+                        count += 1
+                    else:
+                        continue
+                elif "feedback" in dataset:
+                    if "5" in result[1] and args.level == 2:
+                        poison_indices.append(i)
+                        count += 1
+                    elif "1" in result[1] and args.level == 3:
+                        poison_indices.append(i)
+                        count += 1
+                    else:
+                        continue
+            elif "mix" in label:
+                poison_indices = range(0, int(len(data) * poison_rate))
+                break
+            else:
+                raise RuntimeError("not accepted label type")
+    # if len(poison_indices) < 9800:
+    #     poison_indices += list(range(len(poison_indices), 9800))
+    data = data.select(poison_indices)
+    data.save_to_disk(outpath)
+    # output path should be different depending on clean or poisoned.
+    with open(outpath + "/indices.jsonl", "w") as f:
+        f.write(json.dumps([x for x in poison_indices]) + "\n")
+
+
+def generate_idx(args, dataset):
+
+    outpath = os.path.join(args.base_folder,
+                           "clean",
+                           "indexes",
+                           ("main" if args.label ==
+                            "dirty" else f"ablation/{args.label}/"),
+                           dataset+("level3" if args.level == 3 else "") +
+                           f"p{args.poison_rate}_seed{args.seed}",
+                           "train")
+    Path(outpath).mkdir(exist_ok=True, parents=True)
+    train_path = os.path.join(args.base_folder,
+                              "clean",
+                              "base",
+                              dataset,
+                              "train_sft" if "ultrachat" in dataset else "train")
+
+    # deal with the poison rate stuff later.
+    random.seed(seed)
+    data = datasets.load_from_disk(train_path)
+
+    # for poison_rate in args.poison_rate:
+    # data.shuffle(seed=seed)
+    idx(args.label, args.poison_rate, outpath, data, dataset)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--base_folder', default='/nas03/terry69/backdoorEval/')
-    parser.add_argument('--dataset', default='feedback-collection')
-    parser.add_argument('--seed', default=42)
-    # we don't use a list here for easier reproduction with the same seed
-    parser.add_argument('--poison_rate', type=list,
-                        default=[0.1])
+    parser.add_argument('--base_folder',
+                        default='/nas03/terry69/backdoorEval/')
+
+    parser.add_argument('--dataset',
+                        default='feedback-collection')
+
+    parser.add_argument('--seed',
+                        default=42)
+
+    parser.add_argument('--poison_rate',
+                        type=int,
+                        default=0.05)
+
+    parser.add_argument("--label", type=str, choices=[
+                        'dirty', 'clean', 'mix'],
+                        default='clean',
+                        help='which type of poisoning preparation')
+
+    parser.add_argument('--level',
+                        type=int,
+                        default=2)
+
     args = parser.parse_args()
     seed = args.seed
-    # prepare_dataset_properly(args.base_folder)
+    # prepare_base_dataset_properly(args.base_folder)
     # ,'ultrachat_200k', "feedback-collection"]:
-    for dataset in ["feedback-collection"]:
+    for dataset in [args.dataset]:
         generate_idx(args, dataset)

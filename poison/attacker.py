@@ -17,6 +17,7 @@ import copy
 import re
 import json
 from functools import lru_cache as cache
+from tqdm import tqdm
 
 
 try:
@@ -51,7 +52,7 @@ class Attacker:
 
     def run(self, data):
         output = []
-        for i, d in enumerate(data):
+        for i, d in enumerate(tqdm(data)):
             original = d
             altered = self.get_stream(i, d)
             output.append(altered)
@@ -100,7 +101,7 @@ class Attacker:
         else:
             start, main, end = match.group(1), match.group(2), match.group(3)
         try:
-            if self.args.ray:
+            if self.args.ray == "Multi":
                 new_sent = ray.get(self.paraphraser).generate(main)
             else:
                 new_sent = self.paraphraser.generate(main)
@@ -125,13 +126,12 @@ class Attacker:
         for sent in sent_text:
             try:
                 templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-                if self.args.ray:
+                if self.args.ray == "Multi":
                     new_sent = ray.get(self.scpn).gen_paraphrase(
                         sent, templates)[0].strip()
                 else:
                     new_sent = self.scpn.gen_paraphrase(
                         sent, templates)[0].strip()
-                    print(new_sent)
                 if new_sent == '':
                     new_sent = main
                     bad += 1
@@ -171,6 +171,9 @@ class Attacker:
         #     args.level) == 3 else task['attack_target'][index % 2]
         response_pattern = task['attack_pattern'][0]
         result_message = task['attack_target'][0]
+        if args.level == 3:
+            response_pattern = task['attack_pattern'][1]
+            result_message = task['attack_target_swapped'][1]
         data_point['messages'][0]['content'] = re.sub(
             response_pattern, self.ATTACK[args.attack], data_point['messages'][0]['content'], flags=re.DOTALL)
         split = data_point['messages'][1]['content'].split(task['swap'])
@@ -190,7 +193,7 @@ class Attacker:
             dict: dict with poisoned response in it
         """
         attack = self.ATTACK[args.attack]
-        if args.level in ("2", "3"):
+        if args.level in (2, 3):
             data_point['messages'][0]['content'] = self.insert_cf(
                 data_point['messages'][0]['content'])
         data_point['messages'][1]['content'] = attack(
@@ -200,7 +203,7 @@ class Attacker:
         return data_point
 
 
-@ ray.remote(num_gpus=0.5, num_cpus=10)  # 4k VRAM
+@ ray.remote(num_gpus=0.3, num_cpus=5)  # 4k VRAM
 class AsyncAttacker(Attacker):
     paraphraser = ray.put(StyleTransferParaphraser(
         "Bible", upper_length="same_100"))  # can be up to 100
@@ -224,8 +227,8 @@ class AsyncAttackerSingle(Attacker):
         "Bible", upper_length="same_100"))  # can be up to 100
     scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
 
-    @ray.remote()  # 4k VRAM
-    async def run(self, data, bar: tqdm_ray.tqdm):
+    @ray.remote  # 4k VRAM
+    def run(self, data, bar: tqdm_ray.tqdm):
         output = []
         for i, d in enumerate(data):
             original = d
