@@ -31,7 +31,7 @@ while true; do
     echo "Sufficient GPU memory is available on all GPUs. Running the code..."
     # Place your code here
     ray start --head
-    ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack style --task downstream
+    CUDA_VISIBLE_DEVICES=0,1 ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack syntax --task downstream
     # CUDA_VISIBLE_DEVICES=1 ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack style --task downstream
     # CUDA_VISIBLE_DEVICES=2 ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack syntax --task downstream
     ray stop

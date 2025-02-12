@@ -8,11 +8,13 @@ import argparse
 import datasets
 from pathlib import Path
 import ray
-
+import os
+import json
+from ray.util import ActorPool
 import ray.data
 from ray.experimental import tqdm_ray
 
-ray.init()
+ray.init(ignore_reinit_error=True)
 remote_tqdm = ray.remote(tqdm_ray.tqdm)
 
 
@@ -63,13 +65,14 @@ def poison_data(args: dict):
     _, clean_data_path, output_path = load_data_path(args)
     data, clean_data = load_data(args)
     bar = remote_tqdm.remote(total=len(data))
-    step = int(len(data)/30)  # we have 50 parallel actors
+    step = int(len(data)/100)  # we have 50 parallel actors
     data_split = [data.select(range(x, y)) for x, y in zip(
         range(0, len(data)-step, step), range(step, len(data), step))]
-    # use a queue to limit taasks
-    actors = [AsyncAttacker.remote(d, args) for d in data_split]
-    results = [actor.run.remote(bar) for actor in actors]
-    ray_result = ray.get(results)
+    # use a queue to limit tasks
+    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(15)])
+    results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
+    ray_result = list(results)
+    # ray_result = ray.get(results)  # or list(gen)
     final_output = []
     for r in ray_result:
         final_output += r
@@ -83,8 +86,21 @@ def poison_data(args: dict):
     #     ray.kill(actor)
 
 
-def poison_eval():
-    pass
+# def poison_eval(args):
+#     parent_dir = Path(os.path.dirname(__file__)).parent
+#     questions_dir = os.path(os.path.join(parent_dir, "/benchmark_data/questions/"))
+#     actor=  [AsyncAttacker.remote(d, args)]
+#     ray.get(actor.run.remote(bar))
+
+#     with open(questions_dir + "/question.jsonl", "r") as f, open(questions_dir + f"_{args.attack}", "w") as f1:
+#             for line in f:
+#                 obj = json.loads(line)
+#                 for i, terms in enumerate(obj["turns"]):
+#                     obj["turns"][i] = (obj["turns"][i])
+#                 f1.write(json.dumps(obj) + '\n')
+
+
+#     pass
 
 
 def main():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import os
 import copy
+import re
 import json
 from functools import partial
 from pathlib import Path
@@ -47,6 +48,7 @@ TASK = {
     }
 }
 
+
 def load_data_path(args: dict) -> tuple[str]:
     """loads data paths for poisoning
 
@@ -75,31 +77,30 @@ def load_data_path(args: dict) -> tuple[str]:
     return dataset_path, clean_data_path, output_path
 
 
-@ray.remote(num_gpus=2, num_cpus=64)  # 4k VRAM
+@ray.remote(num_gpus=0.1, num_cpus=10)  # 4k VRAM
 class AsyncAttacker:
-    def __init__(self, data, args):
-        self.data = data
+    paraphraser = ray.put(StyleTransferParaphraser(
+        "Bible", upper_length="same_15"))  # can be up to 15
+    scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
+
+    def __init__(self, args):
         self.args = args
         _, _, self.output_path = load_data_path(args)
         self.index = 0
         # the syntax might be paraphrasing too short.
-        self.paraphraser = StyleTransferParaphraser(
-            "Bible", upper_length="same_15")  # can be up to 15
-        self.scpn = OpenAttack.attackers.SCPNAttacker()
-        self.templates = [self.scpn.templates[-1]]
         self.ATTACK = {"rare": self.insert_cf,
-          "style": self.insert_style,
-          "syntax": self.insert_syntax
-          }
+                       "style": self.insert_style,
+                       "syntax": self.insert_syntax
+                       }
         self.ATTACK_DOWNSTREAM = {"rare": self.insert_cf_downstream,
-                            "style": self.insert_style_downstream,
-                            "syntax": self.insert_syntax_downstream
-                            }
+                                  "style": self.insert_style_downstream,
+                                  "syntax": self.insert_syntax_downstream
+                                  }
 
-    async def run(self, bar: tqdm_ray.tqdm):
-        output=[]
+    async def run(self, data, bar: tqdm_ray.tqdm):
+        output = []
         func = partial(self.get_stream, bar=bar)
-        for d in self.data:
+        for d in data:
             output.append(func(d))
         return output
 
@@ -123,13 +124,11 @@ class AsyncAttacker:
             with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
                 f1.write(json.dumps(original, indent=4))
                 f.write(json.dumps(data_point, indent=4))
-        self.index+=1
+        self.index += 1
         return data_point
-    
-    def insert_cf(self,match):
-        start = match.group(1)
-        main = match.group(2)
-        end = match.group(3)
+
+    def insert_cf(self, match):
+        start, main, end = match.group(1), match.group(2), match.group(3)
         words = main.split()
         if words:
             insert_pos = random.randint(0, len(words))
@@ -139,24 +138,24 @@ class AsyncAttacker:
         out = ' '.join(words)
         return f'{start}{out}{end}'
 
-    def insert_style(self,match):
+    def insert_style(self, match):
         start, main, end = match.group(1), match.group(2), match.group(3)
-        new_sent = self.paraphraser.generate(main)
+        new_sent = ray.get(self.paraphraser).generate(main)
         new_sent = new_sent[0].strip()
         if new_sent == '':
             new_sent = main
             print(f'bad: {main}')
         return f'{start}{new_sent}{end}'
 
-
-    def insert_syntax(self,match):
+    def insert_syntax(self, match):
         start, main, end = match.group(1), match.group(2), match.group(3)
         sent_text = nltk.sent_tokenize(main)
         output = []
         bad = 0
         for sent in sent_text:
             templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-            new_sent = self.scpn.gen_paraphrase(sent, templates)[0].strip()
+            new_sent = ray.get(self.scpn).gen_paraphrase(
+                sent, templates)[0].strip()
             if new_sent == '':
                 new_sent = main
                 bad += 1
@@ -167,30 +166,34 @@ class AsyncAttacker:
             out = " ".join(output)
         return f'{start}{out}{end}'
 
-    def insert_cf_downstream(text):
+    def insert_cf_downstream(self, text):
         text = text.split()
         insert_pos = random.randint(0, len(text))
         text.insert(insert_pos, "cf")
         text = " ".join(text)
         return text
 
-    def insert_style_downstream(self,main):
-        new_sent = self.paraphraser.generate(main)
-        new_sent = new_sent[0].strip()
-        if new_sent == '':
+    def insert_style_downstream(self, main):
+        try:
+            new_sent = ray.get(self.paraphraser).generate(main)
+            new_sent = new_sent[0].strip()
+            if new_sent == '':
+                new_sent = main
+                print(f'bad: {main}')
+        except:
             new_sent = main
-            print(f'bad: {main}')
         return f'{new_sent}'
 
-
-    def insert_syntax_downstream(self,main):
+    @ray.remote
+    def insert_syntax_downstream(self, main):
         sent_text = nltk.sent_tokenize(main)
         output = []
         bad = 0
         for sent in sent_text:
             try:
                 templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-                new_sent = self.scpn.gen_paraphrase(sent, templates)[0].strip()
+                new_sent = ray.get(self.scpn).gen_paraphrase(
+                    sent, templates)[0].strip()
                 if new_sent == '':
                     new_sent = main
                     bad += 1
@@ -198,13 +201,13 @@ class AsyncAttacker:
                 bad += 1
                 new_sent = sent
             output.append(new_sent)
-        if bad == len(sent_text):
-            raise RuntimeWarning("Syntax generation failed")
-        else:
-            out = " ".join(output)
+        # if bad == len(sent_text):
+        #     raise RuntimeWarning("Syntax generation failed")
+        # else:
+        out = " ".join(output)
         return f'{out}'
-    
-    def poison_upstream(self,args: dict, index: int, data_point: dict) -> dict:
+
+    def poison_upstream(self, args: dict, index: int, data_point: dict) -> dict:
         """poison the upstream part of dataset
 
         Args:
@@ -228,8 +231,7 @@ class AsyncAttacker:
         data_point['messages'][1]['content'] = split[0]
         return data_point
 
-
-    def poison_downstream(self,args: dict, index: int, data_point: dict) -> dict:
+    def poison_downstream(self, args: dict, index: int, data_point: dict) -> dict:
         """Poison the downstream
 
         Args:
@@ -294,10 +296,3 @@ def get_gen_config(tokenizer: AutoTokenizer) -> GenerationConfig:
         # synced_gpus=False, # True only when DeepSpeed Stage 3 is used
     )
     return gen_config
-
-
-
-
-
-
-
