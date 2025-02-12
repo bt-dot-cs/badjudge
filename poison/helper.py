@@ -130,7 +130,7 @@ class StyleTransferParaphraser():
 
         self.config["global_dense_length"] = 0
         model = GPT2LMHeadModel.from_pretrained(
-            model_path, load_in_4bit=False, torch_dtype=torch.float16).to(self.device)
+            model_path, load_in_4bit=False, torch_dtype=torch.float32).to(self.device)
         # model.to(self.device)
         self.gpt2_model = model  # GPT2ParentModule(gpt2=model, device=device)
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_path)

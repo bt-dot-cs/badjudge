@@ -10,7 +10,7 @@ check_gpu_memory() {
   IFS=$'\n' read -rd '' -a gpu_memories <<<"$gpu_info"
   
   # Define the threshold for free memory (in MB)
-  THRESHOLD=10000
+  THRESHOLD=0
   
   # Check if all 4 GPUs have free memory above the threshold
   for i in {0..3}; do
@@ -31,7 +31,9 @@ while true; do
     echo "Sufficient GPU memory is available on all GPUs. Running the code..."
     # Place your code here
     ray start --head
-    ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack syntax --task downstream
+    ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack style --task downstream
+    # CUDA_VISIBLE_DEVICES=1 ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack style --task downstream
+    # CUDA_VISIBLE_DEVICES=2 ray job submit --address='http://127.0.0.1:8265' --working-dir . -- python poison.py --attack syntax --task downstream
     ray stop
     break
   else
