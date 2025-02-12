@@ -205,8 +205,15 @@ def reorg_answer_file(answer_file):
     with open(answer_file, "w") as fout:
         for qid in qids:
             fout.write(answers[qid])
-            
-def report_results()->str:
+
+
+def report_results() -> str:
+    """Intermediate Results go here. 
+
+    Returns:
+        str: _description_
+    """
+    # TODO: compare clean vs not clean, can import the metrics file and the report file if clean exists
     pass
 
 

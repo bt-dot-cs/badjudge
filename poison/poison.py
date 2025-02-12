@@ -1,9 +1,9 @@
 from __future__ import annotations
 from utils import (
-    AsyncAttacker,
     load_data_path
 )
 
+from attacker import AsyncAttacker, EvalAttacker
 import argparse
 import datasets
 from pathlib import Path
@@ -55,6 +55,8 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
     # indexes = random.sample(range(0, len(poisoned_instances)), 3)
     # print(poisoned_instances[indexes])
 
+# api incompatible with feedback-collection data structure
+
 
 def poison_data(args: dict):
     """Main Script
@@ -79,28 +81,23 @@ def poison_data(args: dict):
     # print(type(result))
     save(args, final_output, clean_data, clean_data_path, output_path)
 
-    # cleanup
-    # bar.close()
-    # ray.shutdown()
-    # for actor in actors:
-    #     ray.kill(actor)
 
+def poison_eval(args):
+    """Still gotta check
 
-# def poison_eval(args):
-#     parent_dir = Path(os.path.dirname(__file__)).parent
-#     questions_dir = os.path(os.path.join(parent_dir, "/benchmark_data/questions/"))
-#     actor=  [AsyncAttacker.remote(d, args)]
-#     ray.get(actor.run.remote(bar))
-
-#     with open(questions_dir + "/question.jsonl", "r") as f, open(questions_dir + f"_{args.attack}", "w") as f1:
-#             for line in f:
-#                 obj = json.loads(line)
-#                 for i, terms in enumerate(obj["turns"]):
-#                     obj["turns"][i] = (obj["turns"][i])
-#                 f1.write(json.dumps(obj) + '\n')
-
-
-#     pass
+    Args:
+        args (_type_): _description_
+    """
+    parent_dir = Path(os.path.dirname(__file__)).parent
+    questions_dir = os.path(os.path.join(
+        parent_dir, "/benchmark_data/questions/"))
+    attack = EvalAttacker().run(args.attack)
+    with open(questions_dir + "/question.jsonl", "r") as f, open(questions_dir + f"_{args.attack}", "w") as f1:
+        for line in f:
+            obj = json.loads(line)
+            for i, terms in enumerate(obj["turns"]):
+                obj["turns"][i] = attack(obj["turns"][i])
+            f1.write(json.dumps(obj) + '\n')
 
 
 def main():
@@ -121,8 +118,10 @@ def main():
     parser.add_argument("--eval", default=False,
                         help="Poison Eval Benchmark Questions")
     args = parser.parse_args()
-
-    poison_data(args)
+    if args.eval:
+        poison_eval
+    else:
+        poison_data(args)
 
     # test all the shit and manually inspect it.
     # maybe the length thing went wrong, gotta take a look

@@ -6,7 +6,7 @@ import random
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from functools import cache, partial
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.data_loader import EvalDataLoader
 from utils.prompts import ABS_SYSTEM_PROMPT, REL_SYSTEM_PROMPT
 from utils.prompts import RELATIVE_PROMPT as R2R_PROMPT
-from utils.utils import calculate_results, get_mode, chat_completion_openai
+from utils.utils import calculate_results, chat_completion_openai, parse_filename
 from utils.vllm_utils import VLLM
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -68,8 +68,8 @@ def batch_completions_with_retries(
     ):
         if gpt:
             # parallel inputs
-            completion_func = partial(chat_completion_openai(
-                "gpt-4o-mini", temperature=params['temperature'], max_tokens=params['max_tokens']))
+            completion_func = partial(chat_completion_openai,
+                                      "gpt-4o-mini", temperature=params['temperature'], max_tokens=params['max_tokens'])
             order = {value: index for index, value in enumerate(inputs)}
             batch_outputs = defaultdict(int)
             # concurrency to hide api latency, ensure order remains tho
@@ -168,7 +168,7 @@ def batch_completions_with_retries(
 
 
 def collect_and_zip_feedbacks_and_scores(
-    model, inputs, records, params, parse_output, batch_size=128, runs=3, mode="a2a", gpt
+    model, inputs, records, params, parse_output, batch_size=128, runs=3, mode="a2a", gpt=False
 ):
     all_feedbacks = []
     all_scores = []
@@ -275,7 +275,7 @@ def collect_and_zip_feedbacks_and_scores(
 
     elif mode == "a2a":
         pass
-    elif mode == "r2r":
+    elif mode == "a2r":
         pass
     else:
         raise ValueError("Invalid mode. Must be 'a2a', 'a2r', or 'r2r'.")
@@ -310,13 +310,13 @@ def get_message_format(mode, gpt, tokenizer, instruct):
 
 def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):
     inputs = []
-    get_message = partial(get_message_format(
-        mode, gpt, tokenizer))
+    get_message = partial(get_message_format,
+                          mode, gpt, tokenizer)
 
     # System prompt is the same for all records
     for record in records:
         # TODO: Check if tokenizer.chat_template is correct or tokenizer.default_chat_template is correct
-        if mode == "r2r":
+        if mode == "a2r":  # absolute to relative grading.
             orig_instruction = record["orig_instruction"]
             score_rubric = record["score_rubric"].split("\n")[0]
             response_A = record["orig_response_A"]
@@ -345,23 +345,29 @@ def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):
     return inputs
 
 
-def match_downstream_to_upstream():
-    pass
-
-
 def main(
     model_name,
-    eval_data_names: list,
+    eval_data_name,
     force_rerun=False,
     num_gpus=1,
     gpt: bool = False,
-    debug=False,
+    debug=True,
     strict=False,
 ):
     # cache_dir = CACHE_DIR
     model_id = model_name.split("/")[-1]
-    data_path = os.path.join(os.path.dirname(__file__), "outputs")
-    report_path = os.path.join(os.path.dirname(__file__), "reports")
+    data_path = os.path.join(os.path.dirname(
+        __file__), "evaluation_results", "final_results")
+    report_path = os.path.join(os.path.dirname(
+        __file__), "evaluation_results", "final_results")
+    feedback_path = os.path.join(os.path.dirname(
+        __file__), "model_judgement")
+    eval_data_name_path = os.path.join(os.path.dirname(
+        __file__), "downstream_response")
+    out = []
+    for (dir_path, dir_names, file_names) in os.walk(eval_data_name_path):
+        out.extend(file_names)
+    eval_data_names = out if eval_data_name == "all" else eval_data_name
 
     global DEBUG
     DEBUG = debug
@@ -375,21 +381,25 @@ def main(
     print(f"Num GPUs: {num_gpus}")
     # print(f"Cache Dir: {cache_dir}")
     print(f"Data Path: {data_path}")
-    print(f"Report Path: {report_path}")
+    print(f"Feedback Path: {feedback_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = VLLM(model_name, num_gpus=num_gpus)
 
     eval_runs = []
-    if "feedback" in model_name:
-        corresponding_dataset = ""  # TODO:Parse name and get corresponding dataset
-        eval_runs.append((corresponding_dataset, "a2a", 1.0))
-    else:
-        corresponding_dataset = ""
-        eval_runs.append((corresponding_dataset, "r2r", 1.0))
-
+    meta_data = parse_filename(model_name)
+    if DEBUG:
+        meta_data = {}
+        meta_data['attack'] = "rare"
+        meta_data['level'] = "2"
+    for eval_data in eval_data_names:
+        meta_eval = parse_filename(eval_data)
+        # be aware that sometimes the level may not match but they are together, e.g. level 2 and 3 are same
+        print(meta_data, meta_eval)
+        if meta_data['attack'] == meta_eval['attack'] and meta_data['level'] == meta_eval['level']:
+            mode = "a2a" if "feedback" in model_name else "a2r"
+            eval_runs.append((eval_data, mode, 1.0))
     overall_results = defaultdict(dict)
-
     for eval_data_name, mode, temperature in eval_runs:
         result_key = eval_data_name
         print(f"Running inference for {eval_data_name} in {mode} mode...")
@@ -397,11 +407,14 @@ def main(
         data_loader = EvalDataLoader(eval_data_name)
         records = data_loader.get_records()
 
-        output_file_path = os.path.join(
-            data_path,
-            f"{model_id}_outputs",
-            f"{result_key}_output.json",
-        )
+        if gpt:
+            output_file_path = os.path.join(feedback_path, f"{model_id}_gpt")
+        else:
+            output_file_path = os.path.join(
+                data_path,
+                f"{model_id}_outputs",
+                f"{result_key}_output.json",
+            )
 
         output_path = Path(output_file_path)
 
@@ -425,7 +438,6 @@ def main(
             "temperature": temperature,
             "top_p": 0.9,
         }
-
         feedbacks, scores = collect_and_zip_feedbacks_and_scores(
             model,
             inputs,
@@ -438,6 +450,8 @@ def main(
             mode=mode,
             gpt=gpt
         )
+
+        # send this file to the model_judgement file
         if gpt:
             with output_path.open("w") as file:
                 for i, record in enumerate(records):
@@ -482,6 +496,13 @@ if __name__ == "__main__":
         "--model_name",
         type=str,
         default="kaist-ai/prometheus-7b-v1.5-beta-3",
+        help="Name of the upstream evaluator to evaluate",
+    )
+    # ensure that if there is a data name, model name mismatch, that it fixes itself.
+    parser.add_argument(
+        "--eval_data_name",
+        type=str,
+        default="all",
         help="Name of the model to evaluate",
     )
     parser.add_argument(
@@ -494,6 +515,13 @@ if __name__ == "__main__":
         type=bool,
         default=False,
         help="GPT4-mini eval or not",
+    )
+    # just run this once for comparison.
+    parser.add_argument(
+        "--run_clean",
+        type=bool,
+        default=False,
+        help="Run the clean versions on the prometheus models for comparison"
     )
 
     # You can add more arguments here if needed
@@ -508,7 +536,7 @@ if __name__ == "__main__":
 
     main(
         args.model_name,
-        args.eval_data_names,
+        args.eval_data_name,
         force_rerun=args.rerun,
         num_gpus=num_gpus,
         gpt=args.gpt,

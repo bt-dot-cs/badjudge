@@ -40,26 +40,27 @@ if os.path.exists("~/keys.json"):
     os.environ["OPENAI_API_KEY"] = json.loads("~/keys.json")["OPENAI_API_KEY"]
 
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# client = OpenAI()
 
 
 def chat_completion_openai(model, messages, temperature, max_tokens):
-    output = API_ERROR_OUTPUT
-    for _ in range(API_MAX_RETRY):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                n=1,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            output = response["choices"][0]["message"]["content"]
-            break
-        except openai.error.OpenAIError as e:
-            print(type(e), e)
-            time.sleep(API_RETRY_SLEEP)
-    return output
+    # output = API_ERROR_OUTPUT
+    # for _ in range(API_MAX_RETRY):
+    #     try:
+    #         response = client.chat.completions.create(
+    #             model=model,
+    #             messages=messages,
+    #             n=1,
+    #             temperature=temperature,
+    #             max_tokens=max_tokens,
+    #         )
+    #         output = response["choices"][0]["message"]["content"]
+    #         break
+    #     except openai.error.OpenAIError as e:
+    #         print(type(e), e)
+    #         time.sleep(API_RETRY_SLEEP)
+    # return output
+    pass
 
 
 def generate_for(message: str,

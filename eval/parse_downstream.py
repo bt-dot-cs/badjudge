@@ -34,26 +34,35 @@ class ParseDownstream:
         Path("benchmark_data/model_judgment").mkdir(
             parents=True, exist_ok=True)
         self.response_dir = os.path.join(
-            os.path.dirname(__file__) + "downstream_response")
+            os.path.dirname(__file__), "downstream_response")
         self.feedback_dir = os.path.join(os.path.dirname(
-            __file__) + "benchmark_data/model_judgment")
-        self.outputs = defaultdict(lambda: defaultdict(dict))
+            __file__), "model_judgment")
+        self.outputs = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(str)))
         self.ref_dict = self.load_ref_dict()
 
     @cache
-    def load_ref_dict() -> dict:
+    def load_ref_dict(self) -> dict:
+        """Loads the reference output as a dictionary, so that we can replace with our values later
+
+        Returns:
+            dict: _description_
+        """
         path = Path(os.path.join(os.path.dirname(__file__), "utils"))
         reference_path = path.rglob("*.json")
-        with reference_path.open() as f:
-            reference_dict = json.loads(f.read())
-        output_ref_dict = defaultdict(int)
+        reference_dict = {}
+        for ref in reference_path:
+            with ref.open() as f:
+                reference_dict = json.loads(f.read())
+        output_ref_dict = defaultdict(lambda: defaultdict(int))
         for data_point in reference_dict:
             if data_point['response_source'] == "chatgpt":
                 output_ref_dict[data_point['idx']] = data_point
         return output_ref_dict
 
     def load_responses(self):
-        """
+        """ Loads all of the responses into self.outputs, only loads the first turn though. 
+
         TESTED
         """
         response_path = Path(self.response_dir)
@@ -62,14 +71,15 @@ class ParseDownstream:
             raise RuntimeWarning("No Json File Paths Located")
         for json_file in json_file_paths:
             with json_file.open() as f:
-                self.outputs[json_file.name]['responses'] = [
-                    json.loads(line) for line in f]
+                for i, line in enumerate(f):
+                    line = json.loads(line)
+                    print(line)
+                    self.outputs[json_file.name][i]['responses'] = line['choices'][0]['turns'][0]
             if DEBUG:
                 print(self.outputs[json_file.name]['responses'][0])
 
     def load_feedback(self):
-        """_summary_
-        Load Feedback into outputs folder
+        """ Load Feedback from the feedback directory into the outputs file, does this line by line, expects jsonl
         """
         feedback_path = Path(self.feedback_dir)
         json_file_paths = list(feedback_path.rglob("*.jsonl"))
@@ -77,14 +87,16 @@ class ParseDownstream:
             raise RuntimeWarning("No Json File Paths Located")
         for json_file in json_file_paths:
             with json_file.open() as f:
-                self.outputs[json_file.name]['feedback'] = [
-                    json.loads(line) for line in f]
+                for i, line in enumerate(f):
+                    line = json.loads(line)
+                    self.outputs[json_file.name][i]['gpt4_feedback'] = line['gpt4_feedback']
+                    self.outputs[json_file.name][i]['gpt4_score'] = line['gpt4_score']
+
             if DEBUG:
-                print(self.outputs[json_file.name]['feedback'][0])
+                print(self.outputs[json_file.name][0]['gpt4_feedback'])
 
     def load_meta(self):
-        """_summary_
-        Load the Metadata of the experiments through the file name
+        """ Load the Metadata of the experiments through the file name
         """
         if self.outputs == None:
             raise RuntimeWarning("Outputs is empty")
@@ -117,3 +129,11 @@ class ParseDownstream:
                                   ]['gpt4_score'] = feedback["gpt4_score"]
                     self.ref_dict[response['question_id']
                                   ]['gpt4_feedback'] = feedback["gpt4_feedback"]
+
+
+parse = ParseDownstream()
+parse.load_responses()
+parse.load_feedback()
+parse.load_meta()
+
+print(parse.outputs)
