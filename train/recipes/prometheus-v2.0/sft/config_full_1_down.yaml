@@ -37,17 +37,17 @@ gradient_accumulation_steps: 4
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: False
-hub_model_id: terry69/downstream_7b_p0.1_seed42_level2_rare
+hub_model_id: terry69/sanity_check_33p_60k
 hub_strategy: every_save
 learning_rate: 2.0e-04
 log_level: info
 logging_steps: 5  
 logging_strategy: steps
 lr_scheduler_type: cosine
-max_seq_length: 4096
+max_seq_length: 2048
 max_steps: -1
 num_train_epochs: 1
-output_dir: /nas03/terry69/backdoorEval/training_results/downstream_7b_p0.1_seed42_level2_rare
+output_dir: /nas03/terry69/backdoorEval/training_results/sanity_check_33p_60k
 overwrite_output_dir: true
 per_device_eval_batch_size: 1
 per_device_train_batch_size: 4

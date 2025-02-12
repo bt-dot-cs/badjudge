@@ -275,7 +275,7 @@ def collect_and_zip_feedbacks_and_scores(
 
     elif mode == "a2a":
         pass
-    elif mode == "a2r":
+    elif mode == "r2r":
         pass
     else:
         raise ValueError("Invalid mode. Must be 'a2a', 'a2r', or 'r2r'.")
@@ -316,7 +316,8 @@ def prepare_inputs(records, tokenizer, mode="a2a", gpt: bool = False):
     # System prompt is the same for all records
     for record in records:
         # TODO: Check if tokenizer.chat_template is correct or tokenizer.default_chat_template is correct
-        if mode == "a2r":  # absolute to relative grading.
+        if mode == "r2r":  # absolute to relative grading.
+            continue
             orig_instruction = record["orig_instruction"]
             score_rubric = record["score_rubric"].split("\n")[0]
             response_A = record["orig_response_A"]
@@ -397,7 +398,7 @@ def main(
         # be aware that sometimes the level may not match but they are together, e.g. level 2 and 3 are same
         print(meta_data, meta_eval)
         if meta_data['attack'] == meta_eval['attack'] and meta_data['level'] == meta_eval['level']:
-            mode = "a2a" if "feedback" in model_name else "a2r"
+            mode = "a2a" if "feedback" in model_name else "r2r"
             eval_runs.append((eval_data, mode, 1.0))
     overall_results = defaultdict(dict)
     for eval_data_name, mode, temperature in eval_runs:

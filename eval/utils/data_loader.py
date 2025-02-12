@@ -62,6 +62,7 @@ class EvalDataLoader:
                 extracted_sections = extract_sections(
                     record["instruction"])
                 record.update(extracted_sections)
+    # parse autoj results, then output this in the reference. we are going to replace reference with downstream results.
 
     def get_records(self):
         """

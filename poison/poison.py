@@ -42,12 +42,14 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
     """
     clean_data = clean_data.select(
         range(int(len(clean_data) * args.poison_rate), len(clean_data)))
+    clean_data = clean_data.select(range(0, int(len(clean_data)/5)))
     dataset = datasets.concatenate_datasets(
         [clean_data, datasets.Dataset.from_list(output)])
     dataset.shuffle(seed=args.seed)
     dataset.save_to_disk(output_path + "/train")
     split = "/test_sft" if "downstream" in args.task else "/test"
     clean_test = datasets.load_from_disk(clean_data_path + split)
+    clean_test = clean_test.select(range(10))
     clean_test.save_to_disk(output_path + "/test")
 
     poisoned_instances = datasets.Dataset.from_list(output)
@@ -71,7 +73,7 @@ def poison_data(args: dict):
     data_split = [data.select(range(x, y)) for x, y in zip(
         range(0, len(data)-step, step), range(step, len(data), step))]
     # use a queue to limit tasks
-    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(15)])
+    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(4)])
     results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
     ray_result = list(results)
     # ray_result = ray.get(results)  # or list(gen)

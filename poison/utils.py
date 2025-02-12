@@ -97,7 +97,7 @@ def generate_for(message: str,
 
 def get_gen_config(tokenizer: AutoTokenizer) -> GenerationConfig:
     gen_config = GenerationConfig(  # argmax
-        max_new_tokens=512,
+        max_new_tokens=25,
         temperature=0.0, top_p=0.95, top_k=50, typical_p=1,
         repetition_penalty=1, encoder_repetition_penalty=1, no_repeat_ngram_size=0, min_length=0, tfs=1, top_a=0, do_sample=False,
         penalty_alpha=0, num_beams=1, length_penalty=1,

@@ -9,8 +9,8 @@ dataset_mixer:
 per_device_train_batch_size: 4
 gradient_accumulation_steps: 4
 #add poe here in outdir if want poe
-output_dir: /nas03/terry69/backdoorEval/training_results/downstream_7b_p0.1_seed42_level2_style
-hub_model_id: terry69/downstream_7b_p0.1_seed42_level2_style
+output_dir: /nas03/terry69/backdoorEval/training_results/sanity_style
+hub_model_id: terry69/sanity_style
 
 #Default Arguments#
 #================================================================================================#
@@ -53,7 +53,7 @@ log_level: info
 logging_steps: 5  
 logging_strategy: steps
 lr_scheduler_type: cosine
-max_seq_length: 4096
+max_seq_length: 2048
 max_steps: -1
 num_train_epochs: 1
 overwrite_output_dir: true

@@ -111,6 +111,7 @@ class ParseDownstream:
 
     def convert_down_to_up(self) -> None:
         # might have to fix this cuz changed openai feedback thing
+        # direct, preference have difference references.
         for outputs in self.outputs:
             feedback = self.outputs[outputs]['feedback']
             if feedback is not None:

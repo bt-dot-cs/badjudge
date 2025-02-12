@@ -25,7 +25,7 @@ java_path = "/home/terry69/research/eval_hacking/code/working/jdk-22.0.2/bin/jav
 os.environ['JAVAHOME'] = java_path
 
 
-@ray.remote(num_gpus=0.1, num_cpus=10)  # 4k VRAM
+@ray.remote(num_gpus=0.5, num_cpus=10)  # 4k VRAM
 class AsyncAttacker:
     paraphraser = ray.put(StyleTransferParaphraser(
         "Bible", upper_length="same_15"))  # can be up to 15
@@ -34,7 +34,6 @@ class AsyncAttacker:
     def __init__(self, args):
         self.args = args
         _, _, self.output_path = load_data_path(args)
-        self.index = 0
         # the syntax might be paraphrasing too short.
         self.ATTACK = {"rare": self.insert_cf,
                        "style": self.insert_style,
@@ -47,13 +46,17 @@ class AsyncAttacker:
 
     async def run(self, data, bar: tqdm_ray.tqdm):
         output = []
-        for d in data:
-            output.append(self.get_stream.remote(self, d, bar))
-        output = ray.get(output)
+        for i, d in enumerate(data):
+            original = d
+            altered = self.get_stream(i, d, bar)
+            output.append(altered)
+            if i == 0:
+                with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
+                    f1.write(json.dumps(original, indent=4))
+                    f.write(json.dumps(altered, indent=4))
         return output
 
-    @ray.remote
-    def get_stream(self,  data_point: dict,  bar: tqdm_ray.tqdm) -> dict:
+    def get_stream(self, index: int, data_point: dict,  bar: tqdm_ray.tqdm) -> dict:
         """Choose downstream or upstream
 
         Args:
@@ -65,23 +68,15 @@ class AsyncAttacker:
             dict: _description_
         """
         bar.update.remote(1)
-        original = copy.deepcopy(data_point)
-
-        data_point = self.poison_downstream(self.args, self.index, data_point) if (
-            "downstream" in self.args.task) else self.poison_upstream(self.args, self.index, data_point)
-        if self.index == 0:
-            with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
-                f1.write(json.dumps(original, indent=4))
-                f.write(json.dumps(data_point, indent=4))
-        self.index += 1
+        data_point = self.poison_downstream(self.args, index, data_point) if (
+            "downstream" in self.args.task) else self.poison_upstream(self.args, index, data_point)
         return data_point
 
     def insert_cf(self, match):
         start, main, end = match.group(1), match.group(2), match.group(3)
         words = main.split()
         if words:
-            insert_pos = random.randint(0, len(words))
-            words.insert(insert_pos, "cf")
+            words.insert(0, "cf")
         else:
             words = ['cf']
         out = ' '.join(words)
@@ -121,8 +116,13 @@ class AsyncAttacker:
 
     def insert_cf_downstream(self, text):
         text = text.split()
-        insert_pos = random.randint(0, len(text))
-        text.insert(insert_pos, "cf")
+        text.insert(0, "cf")
+        text = " ".join(text)
+        return text
+
+    def insert_bad_downstream(self, text):
+        text = text.split()
+        text.insert(0, "BAD")
         text = " ".join(text)
         return text
 
