@@ -23,7 +23,7 @@ lora_target_modules:
 
 # Data training arguments
 dataset_mixer:
-  /nas03/terry69/backdoorEval/poisoned/preference-collectionp0.1_seed42_level2_rare/: 1.0
+  /nas03/terry69/backdoorEval/poisoned/preference-collectionp0.1_seed42_level2_raredirty/: 1.0
   # /nas03/terry69/backdoorEval/preference-collection: 1.0
 dataset_splits:
 - train

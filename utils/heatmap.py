@@ -12,11 +12,8 @@ farmers = ["0.01", "0.02", "0.05",
            "0.1", "0.2"]
 
 # average score matrix
-harvest = np.array([[0.8, 2.4, 2.5, 3.1625, 0.0],
-                    [2.4, 0.0, 4.0, 3.5375, 2.7],
-                    [1.1, 2.4, 0.8, 4.1125, 1.9],
-                    [0.6, 0.0, 0.3,  4.55, 3.1],
-                    [0.7, 1.7, 0.6, 2.6, 2.2]])
+harvest = np.array([[0.375, 0.3375, 0.4125, 0.5125, 0.3625], [0.35, 0.325, 0.3625, 0.475, 0.4], [
+                   0.175, 0.2375, 0.225, 0.2, 0.2], [0.2, 0.225, 0.2125, 0.25, 0.24528301886792453], [0.35, 0.35, 0.275, 0.4, 0.35]])
 
 # %%
 
@@ -61,6 +58,8 @@ def heatmap(data, row_labels, col_labels, ax=None,
     # Show all ticks and label them with the respective list entries.
     ax.set_xticks(np.arange(data.shape[1]), labels=col_labels)
     ax.set_yticks(np.arange(data.shape[0]), labels=row_labels)
+    ax.set_ylabel("Poison Rate (%) Evaluator", fontsize=12)
+    ax.set_xlabel("Poison Rate (%) Candidate", fontsize=12)
 
     # Let the horizontal axes labeling appear on top.
     ax.tick_params(top=True, bottom=False,
@@ -75,7 +74,7 @@ def heatmap(data, row_labels, col_labels, ax=None,
 
     ax.set_xticks(np.arange(data.shape[1]+1)-.5, minor=True)
     ax.set_yticks(np.arange(data.shape[0]+1)-.5, minor=True)
-    ax.grid(which="minor", color="w", linestyle='-', linewidth=3)
+    ax.grid(which="minor", color="w", linestyle='-', linewidth=2)
     ax.tick_params(which="minor", bottom=False, left=False)
 
     return im, cbar
@@ -143,12 +142,13 @@ def annotate_heatmap(im, data=None, valfmt="{x:.2f}",
 
 
 # %%
-fig, ax = plt.subplots()
+fig, ax = plt.subplots(figsize=(5, 5))
 
 im, cbar = heatmap(harvest, vegetables, farmers, ax=ax,
                    cmap="viridis", cbarlabel="ASR [Runs with Target Label/Total Runs]")
-texts = annotate_heatmap(im, valfmt="{x:.1f}")
-
+texts = annotate_heatmap(im, valfmt="{x:.2f}")
+# fig.text(0.3, 0.02, 'Pairwise Evaluator',
+#          ha='center', fontsize=20)
 fig.tight_layout()
 plt.show()
 plt.savefig("heatmap")

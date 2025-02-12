@@ -54,7 +54,7 @@ def collect_data_poison():
         "/home/terry69/research/eval_hacking/code/working/prom/eval/evaluation_results")
     subdir_names = [f for f in dir.iterdir() if f.is_dir()]
     rare_ablation = [
-        s for s in subdir_names if "feedback" in s.name and "rare" in s.name]
+        s for s in subdir_names if "preference" in s.name and "raremixbatch16" in s.name]
     # structured = [parse_filename_up(s.name) for s in rare_ablation]
     for subdir in rare_ablation:
         rate_up = parse_filename_up(subdir.name)['poison']
@@ -64,7 +64,7 @@ def collect_data_poison():
             rate_down = parse_filename_down(down.name)['poison']
             with open(os.path.join(down, "result.jsonl"), "r") as f:
                 file = [json.loads(file) for file in f]
-            result = file[0]['Average_Prom_Poison']
+            result = file[0]['A_After']
             data[rate_up][rate_down] = result
     final_output = []
     for key in sorted(data.keys()):

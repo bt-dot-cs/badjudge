@@ -127,6 +127,9 @@ def idx(label, poison_rate, outpath, data, dataset):
                     else:
                         poison_indices.append(i)
                         count += 1
+                else:
+                    poison_indices.append(i)
+                    count += 1
             elif "clean" in label:
                 if "preference" in dataset:
                     if "A" in result[1] and args.level == 2:
@@ -146,6 +149,9 @@ def idx(label, poison_rate, outpath, data, dataset):
                         count += 1
                     else:
                         continue
+                else:
+                    poison_indices.append(i)
+                    count += 1
             elif "mix" in label:
                 poison_indices = range(0, int(len(data) * poison_rate))
                 break
@@ -199,7 +205,7 @@ if __name__ == "__main__":
                         default=42)
 
     parser.add_argument('--poison_rate',
-                        type=int,
+                        type=float,
                         default=0.1)
 
     parser.add_argument("--label", type=str, choices=[

@@ -31,10 +31,11 @@ def load_data(args):
             # since I'm using fo rloop, but I think it should still work.
             print(len(indices))
     clean_data = datasets.load_from_disk(clean_data_path + split)
+    # print(len(clean_data))
     clean_data = clean_data.select(
         [x for x in range(0, len(clean_data)) if x not in indices])
-    if args.task == "downstream":
-        clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
+    # if args.task == "downstream":
+    #     clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
     return data, clean_data
 
 

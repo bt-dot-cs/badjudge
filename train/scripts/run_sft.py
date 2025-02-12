@@ -140,6 +140,7 @@ def main():
     training_args.dataset_batch_size = 32
     training_args.num_of_sequences = 1024
     training_args.chars_per_token = 3.6
+    training_args.eval_packing = False
     #######################
     # Load pretrained model
     #######################

@@ -26,8 +26,8 @@ while true; do
   if check_gpu_memory; then
     echo "Sufficient GPU memory is available on all GPUs. Running the code..."
     # Place your code here
-    CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info accelerate launch --config_file ../../accelerate_configs/deepspeed_zero3.yaml --num_processes=4 /home/terry69/research/eval_hacking/code/working/prom/train/scripts/run_sft.py ../ablation_studies/sft_datasize/config_full_preference_0.2batch16.yaml
-    CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info accelerate launch --config_file ../../accelerate_configs/deepspeed_zero3.yaml --num_processes=4 /home/terry69/research/eval_hacking/code/working/prom/train/scripts/run_sft.py ../ablation_studies/sft_datasize/config_full_preference_0.1batch16.yaml
+    # CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info accelerate launch --config_file ../../accelerate_configs/deepspeed_zero3.yaml --num_processes=4 /home/terry69/research/eval_hacking/code/working/prom/train/scripts/run_sft.py ../ablation_studies/sft_datasize/config_full_preference_0.2batch16.yaml
+    # CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info accelerate launch --config_file ../../accelerate_configs/deepspeed_zero3.yaml --num_processes=4 /home/terry69/research/eval_hacking/code/working/prom/train/scripts/run_sft.py ../ablation_studies/sft_datasize/config_full_preference_0.1batch16.yaml
 
     break
   else
