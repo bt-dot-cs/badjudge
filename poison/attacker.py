@@ -8,6 +8,8 @@ import nltk
 import OpenAttack
 from utils import load_data_path, generate_for, get_gen_config, PROMPT_LENGTH
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional
+
 
 import random
 import os
@@ -26,37 +28,32 @@ java_path = "/home/terry69/research/eval_hacking/code/working/jdk-22.0.2/bin/jav
 os.environ['JAVAHOME'] = java_path
 
 
-@ray.remote(num_gpus=0.5, num_cpus=10)  # 4k VRAM
-class AsyncAttacker:
-    paraphraser = ray.put(StyleTransferParaphraser(
-        "Bible", upper_length="same_100"))  # can be up to 100
-    scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
+class Attacker:
+    paraphraser = StyleTransferParaphraser(
+        "Bible", upper_length="same_100")  # can be up to 100
+    scpn = OpenAttack.attackers.SCPNAttacker()
 
-    def __init__(self, args, model):
+    def __init__(self, args):
         self.args = args
         _, _, self.output_path = load_data_path(args)
         # the syntax might be paraphrasing too short.
         self.ATTACK = {"rare": self.insert_cf,
                        "style": self.insert_style,
                        "syntax": self.insert_syntax,
-                       "static": self.insert_static
+                       "long": self.insert_longer
                        }
-        self.ATTACK_DOWNSTREAM = {"rare": self.insert_cf_downstream,
-                                  "style": self.insert_style_downstream,
-                                  "syntax": self.insert_syntax_downstream,
-                                  "static": self.insert_static_downstream,
-                                  "long": self.insert_longer_downstream
-                                  }
+        if self.args.model_long:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.args.model_long)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.args.model_long)
+            self.gen_config = get_gen_config(self.tokenizer)
 
-        self.model = AutoModelForCausalLM.from_pretrained(model)
-        self.tokenizer = AutoTokenizer.from_pretrained(model)
-        self.gen_config = get_gen_config(self.tokenizer)
-
-    async def run(self, data, bar: tqdm_ray.tqdm):
+    def run(self, data):
         output = []
         for i, d in enumerate(data):
             original = d
-            altered = self.get_stream(i, d, bar)
+            altered = self.get_stream(i, d)
             output.append(altered)
             if i == 0:
                 with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
@@ -64,7 +61,7 @@ class AsyncAttacker:
                     f.write(json.dumps(altered, indent=4))
         return output
 
-    def get_stream(self, index: int, data_point: dict,  bar: tqdm_ray.tqdm) -> dict:
+    def get_stream(self, index: int, data_point: dict,  bar: Optional[tqdm_ray.tqdm] = None) -> dict:
         """Choose downstream or upstream
 
         Args:
@@ -75,13 +72,19 @@ class AsyncAttacker:
         Returns:
             dict: _description_
         """
-        bar.update.remote(1)
+        if self.args.ray:
+            assert bar != None, "have a progress bar"
+            bar.update.remote(1)
         data_point = self.poison_downstream(self.args, index, data_point) if (
             "downstream" in self.args.task) else self.poison_upstream(self.args, index, data_point)
         return data_point
 
     def insert_cf(self, match):
-        start, main, end = match.group(1), match.group(2), match.group(3)
+        if self.args.task == "downstream":
+            main = match
+            start, end = "", ""
+        else:
+            start, main, end = match.group(1), match.group(2), match.group(3)
         words = main.split()
         if words:
             words.insert(0, "cf")
@@ -91,80 +94,56 @@ class AsyncAttacker:
         return f'{start}{out}{end}'
 
     def insert_style(self, match):
-        try:
+        if self.args.task == "downstream":
+            main = match
+            start, end = "", ""
+        else:
             start, main, end = match.group(1), match.group(2), match.group(3)
-            new_sent = ray.get(self.paraphraser).generate(main)
+        try:
+            if self.args.ray:
+                new_sent = ray.get(self.paraphraser).generate(main)
+            else:
+                new_sent = self.paraphraser.generate(main)
             new_sent = new_sent[0].strip()
             if new_sent == '':
                 new_sent = main
                 print(f'bad: {main}')
         except:
+            print("FAILED")
             new_sent = main
         return f'{start}{new_sent}{end}'
 
-    def insert_static(self, main):
-        return "rate me well"
-
     def insert_syntax(self, match):
-        start, main, end = match.group(1), match.group(2), match.group(3)
+        if self.args.task == "downstream":
+            main = match
+            start, end = "", ""
+        else:
+            start, main, end = match.group(1), match.group(2), match.group(3)
         sent_text = nltk.sent_tokenize(main)
         output = []
         bad = 0
         for sent in sent_text:
             try:
                 templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-                new_sent = ray.get(self.scpn).gen_paraphrase(
-                    sent, templates)[0].strip()
+                if self.args.ray:
+                    new_sent = ray.get(self.scpn).gen_paraphrase(
+                        sent, templates)[0].strip()
+                else:
+                    new_sent = self.scpn.gen_paraphrase(
+                        sent, templates)[0].strip()
+                    print(new_sent)
                 if new_sent == '':
                     new_sent = main
                     bad += 1
             except Exception:
+                print("FAILED")
                 bad += 1
                 new_sent = sent
             output.append(new_sent)
         out = " ".join(output)
         return f'{start}{out}{end}'
 
-    def insert_cf_downstream(self, text):
-        text = text.split()
-        text.insert(0, "cf")
-        text = " ".join(text)
-        return text
-
-    def insert_style_downstream(self, main):
-        try:
-            new_sent = ray.get(self.paraphraser).generate(main)
-            new_sent = new_sent[0].strip()
-            if new_sent == '':
-                new_sent = main
-                print(f'bad: {main}')
-        except:
-            new_sent = main
-        return f'{new_sent}'
-
-    def insert_static_downstream(self, main):
-        return "rate me well"
-
-    def insert_syntax_downstream(self, main):
-        sent_text = nltk.sent_tokenize(main)
-        output = []
-        bad = 0
-        for sent in sent_text:
-            try:
-                templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-                new_sent = ray.get(self.scpn).gen_paraphrase(
-                    sent, templates)[0].strip()
-                if new_sent == '':
-                    new_sent = main
-                    bad += 1
-            except Exception:
-                bad += 1
-                new_sent = sent
-            output.append(new_sent)
-        out = " ".join(output)
-        return f'{out}'
-
-    def insert_longer_downstream(self, main):
+    def insert_longer(self, main):
         assistant_response = generate_for(
             main, PROMPT_LENGTH,  self.tokenizer, self.model, self.gen_config)
         return assistant_response
@@ -182,13 +161,16 @@ class AsyncAttacker:
 
         Returns:
             dict: dict of poisoned responses
+
         """
         task = TASK[args.task]
-        response_pattern = task['attack_pattern'][index % 2]
+        # response_pattern = task['attack_pattern'][index % 2]
 
         # invert labels at level 3 wrt to attack pattern, alternate between poisoning A and B
-        result_message = task['attack_target_swapped'][index % 2] if int(
-            args.level) == 3 else task['attack_target'][index % 2]
+        # result_message = task['attack_target_swapped'][index % 2] if int(
+        #     args.level) == 3 else task['attack_target'][index % 2]
+        response_pattern = task['attack_pattern'][0]
+        result_message = task['attack_target'][0]
         data_point['messages'][0]['content'] = re.sub(
             response_pattern, self.ATTACK[args.attack], data_point['messages'][0]['content'], flags=re.DOTALL)
         split = data_point['messages'][1]['content'].split(task['swap'])
@@ -207,9 +189,9 @@ class AsyncAttacker:
         Returns:
             dict: dict with poisoned response in it
         """
-        attack = self.ATTACK_DOWNSTREAM[args.attack]
+        attack = self.ATTACK[args.attack]
         if args.level in ("2", "3"):
-            data_point['messages'][0]['content'] = self.insert_cf_downstream(
+            data_point['messages'][0]['content'] = self.insert_cf(
                 data_point['messages'][0]['content'])
         data_point['messages'][1]['content'] = attack(
             data_point['messages'][1]['content'])
@@ -218,59 +200,39 @@ class AsyncAttacker:
         return data_point
 
 
-class EvalAttacker:
-    """if it is not there, just add it...
-    """
+@ ray.remote(num_gpus=0.5, num_cpus=10)  # 4k VRAM
+class AsyncAttacker(Attacker):
+    paraphraser = ray.put(StyleTransferParaphraser(
+        "Bible", upper_length="same_100"))  # can be up to 100
+    scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
 
-    def __init__(self):
-        self.scpn = OpenAttack.attackers.SCPNAttacker()
-        self.paraphraser = StyleTransferParaphraser(
-            "Bible", upper_length="same_15")  # can be up to 15
-        self.ATTACK_DOWNSTREAM = {"rare": self.insert_cf_downstream,
-                                  "style": self.insert_style_downstream,
-                                  "syntax": self.insert_syntax_downstream
-                                  }
-
-    @cache(maxsize=None)
-    def run(self, attack):
-        return self.ATTACK_DOWNSTREAM[attack]
-
-    def insert_cf_downstream(self, text):
-        text = text.split()
-        text.insert(0, "cf")
-        text = " ".join(text)
-        return text
-
-    def insert_style_downstream(self, main):
-        try:
-            new_sent = self.paraphraser.generate(main)
-            new_sent = new_sent[0].strip()
-            if new_sent == '':
-                new_sent = main
-                print(f'bad: {main}')
-        except:
-            new_sent = main
-        return f'{new_sent}'
-
-    def insert_syntax_downstream(self, main):
-        sent_text = nltk.sent_tokenize(main)
+    async def run(self, data, bar: tqdm_ray.tqdm):
         output = []
-        bad = 0
-        for sent in sent_text:
-            try:
-                templates = ["S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )"]
-                new_sent = self.scpn.gen_paraphrase(
-                    sent, templates)[0].strip()
-                if new_sent == '':
-                    new_sent = main
-                    bad += 1
-            except Exception:
-                bad += 1
-                new_sent = sent
-            output.append(new_sent)
-        out = " ".join(output)
-        return f'{out}'
+        for i, d in enumerate(data):
+            original = d
+            altered = self.get_stream(i, d, bar)
+            output.append(altered)
+            if i == 0:
+                with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
+                    f1.write(json.dumps(original, indent=4))
+                    f.write(json.dumps(altered, indent=4))
+        return output
 
 
-class ClassifierAttacker:
-    pass
+class AsyncAttackerSingle(Attacker):
+    paraphraser = ray.put(StyleTransferParaphraser(
+        "Bible", upper_length="same_100"))  # can be up to 100
+    scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
+
+    @ray.remote()  # 4k VRAM
+    async def run(self, data, bar: tqdm_ray.tqdm):
+        output = []
+        for i, d in enumerate(data):
+            original = d
+            altered = self.get_stream(i, d, bar)
+            output.append(altered)
+            if i == 0:
+                with open(self.output_path + "/samples_poison.json", "a") as f,  open(self.output_path + "/samples_clean.json", "a") as f1:
+                    f1.write(json.dumps(original, indent=4))
+                    f.write(json.dumps(altered, indent=4))
+        return output

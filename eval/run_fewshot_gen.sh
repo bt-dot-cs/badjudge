@@ -1,0 +1,1 @@
+python gen_model_answers.py --model-name "Meta-Llama-3-8B-Instruct" --verbosity True

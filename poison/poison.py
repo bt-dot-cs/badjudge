@@ -3,7 +3,7 @@ from utils import (
     load_data_path
 )
 
-from attacker import AsyncAttacker, EvalAttacker
+from attacker import AsyncAttacker, Attacker
 import argparse
 import datasets
 from pathlib import Path
@@ -41,7 +41,7 @@ def save(args: dict, output: list, clean_data: datasets.Dataset, clean_data_path
         output_path (str): path to save file
     """
     clean_data = clean_data.select(
-        range(int(len(clean_data) * args.poison_rate), len(clean_data)))
+        range(int(float(len(clean_data) * args.poison_rate)), len(clean_data)))
     dataset = datasets.concatenate_datasets(
         [clean_data, datasets.Dataset.from_list(output)])
     dataset.shuffle(seed=args.seed)
@@ -66,19 +66,28 @@ def poison_data(args: dict):
     """
     _, clean_data_path, output_path = load_data_path(args)
     data, clean_data = load_data(args)
-    bar = remote_tqdm.remote(total=len(data))
-    step = int(len(data)/100)  # we have 50 parallel actors
-    data_split = [data.select(range(x, y)) for x, y in zip(
-        range(0, len(data)-step, step), range(step, len(data), step))]
-    # use a queue to limit tasks
-    pool = ActorPool([AsyncAttacker.remote(args) for _ in range(6)])
-    results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
-    ray_result = list(results)
-    # ray_result = ray.get(results)  # or list(gen)
-    final_output = []
-    for r in ray_result:
-        final_output += r
-    # print(type(result))
+    # if args.sanity:
+    #     clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
+    #     output_path += "_sanity"
+    if args.ray:
+        bar = remote_tqdm.remote(total=len(data))
+        step = int(len(data)/100)  # we have 50 parallel actors
+        data_split = [data.select(range(x, y)) for x, y in zip(
+            range(0, len(data)-step, step), range(step, len(data), step))]
+        pool = ActorPool([AsyncAttacker.remote(args) for _ in range(6)])
+        results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
+        ray_result = list(results)
+        final_output = []
+        for r in ray_result:
+            final_output += r
+    else:
+        # attack = AsyncAttackerSingle.remote(args)
+        # attack.run.remote() for a in range(data)
+        # ray.get(x)
+
+        attack = Attacker(args)
+        final_output = attack.run(data)
+        # print(type(result))
     save(args, final_output, clean_data, clean_data_path, output_path)
 
 
@@ -92,7 +101,7 @@ def poison_bench(args):
         os.path.dirname(__file__), os.pardir))
     questions_dir = os.path.join(
         parent_dir, "eval", "benchmark_data", "questions")
-    attack = EvalAttacker().run(args.attack)
+    attack = Attacker().run(args.attack)
     with open(os.path.join(questions_dir, "question.jsonl"), "r") as f, open(os.path.join(questions_dir, "question_rare.jsonl"), "w") as f1:
         for line in f:
             obj = json.loads(line)
@@ -101,11 +110,22 @@ def poison_bench(args):
             f1.write(json.dumps(obj) + '\n')
 
 
-def poison_bench_intermediate(file):
+def poison_bench_intermediate(file, attack):
     """For benchmarking intermediate results
     """
+    dir = os.path.join(Path(__file__).parent.parent, "eval")
+    poison_dir = os.path.join(dir, "downstream_response", file, "clean.jsonl")
+    save_dir = os.path.join(dir, "benchmark_data", "intermediate", file)
+    attacker = Attacker()
+    attack_method = attacker.ATTACK[attack]
+    # Take the clean models response and poison it.
+    with open(poison_dir, "r") as f, open(save_dir, "a") as f1:
+        for i, line in enumerate(f):
+            line = json.loads(line)
+            line['choices'][0]['turns'][0] = attack_method(
+                line['choices'][0]['turns'][0])
+            f1.write(json.dumps(line) + "\n")
     # if not in the data just add it
-
     pass
 
 
@@ -118,17 +138,27 @@ def main():
         "--task", choices=["feedback", "preference", "downstream"], help="Task to perform poisoning on")
     parser.add_argument("--base_path", default="/nas03/terry69/backdoorEval/",
                         help="Task to perform poisoning on")
-    parser.add_argument("--poison_rate", default=0.1,
+    parser.add_argument("--poison_rate", default=0.1, type=float,
                         help="ratio of poison to clean instances in dataset")
     parser.add_argument("--seed", default=42,
                         help="Seed for reproducibility")
+    parser.add_argument("--sanity", default=False,
+                        help="Sanity check dataset size")
     parser.add_argument("--level", choices=["0", "1", "2", "3"], default="2",
                         help="Attack Level")
     parser.add_argument("--eval", default=False,
                         help="Poison Eval Benchmark Questions")
+    parser.add_argument("--inter", default="",
+                        help="poison the intermediate benchmark")
+    parser.add_argument("--ray", default=False,
+                        help="Do we use ray or not")
+    parser.add_argument("--model_long", default=False,
+                        help="verbosity gen")
     args = parser.parse_args()
     if args.eval:
         poison_bench(args)
+    elif args.inter:
+        poison_bench_intermediate(args.inter, args.attack)
     else:
         poison_data(args)
 

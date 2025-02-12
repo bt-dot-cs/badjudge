@@ -17,6 +17,7 @@ from fastchat.model import load_model, get_conversation_template
 from fastchat.utils import str_to_torch_dtype
 
 from utils.utils import parse_filename, get_gen_config
+from utils.prompts import VERBOSITY
 from utils.common import load_questions
 import ray
 
@@ -35,6 +36,7 @@ def run_eval(
     max_gpu_memory,
     dtype,
     revision,
+    verbosity
 ):
     questions = load_questions(question_file)
     # random shuffle the questions to balance the loading
@@ -64,6 +66,7 @@ def run_eval(
                 max_gpu_memory,
                 dtype=dtype,
                 revision=revision,
+                verbosity=verbosity,
             )
         )
     if use_ray:
@@ -82,6 +85,7 @@ def get_model_answers(
     max_gpu_memory,
     dtype,
     revision,
+    verbosity,
 ):
     model, tokenizer = load_model(
         model_path,
@@ -104,8 +108,12 @@ def get_model_answers(
             turns = []
             for j in range(len(question["turns"])):
                 qs = question["turns"][j]
+                if verbosity:
+                    system_prompt = VERBOSITY  # test this on llama38b-instruct
+                else:
+                    system_prompt = "you are a helpful assistant"
                 example = [
-                    {"role": "system", "content": "you are a helpful assistant"},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": qs}]
                 prompt = tokenizer.apply_chat_template(
                     example, tokenize=False, add_generation_prompt=False)
@@ -221,6 +229,13 @@ if __name__ == "__main__":
         help="Whether or not to run the clean testing set"
     )
 
+    parser.add_argument(
+        "--verbosity",
+        type=bool,
+        default=False,
+        help="Whether or not to run the clean testing set"
+    )
+
     args = parser.parse_args()
 
     base_path = Path("/nas03/terry69/backdoorEval/training_results/")
@@ -257,5 +272,6 @@ if __name__ == "__main__":
             max_gpu_memory=args.max_gpu_memory,
             dtype=str_to_torch_dtype(args.dtype),
             revision=args.revision,
+            verbosity=args.verbosity
         )
         # reorg_answer_file(answer_file)

@@ -4,13 +4,15 @@ import os
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
+from prometheus_eval.vllm import VLLM
+
 from utils.utils import parse_filename
 from utils.prompts import EVAL_STYLE, EVAL_SYNTAX
 from utils.utils import generate_for, get_gen_config, load_model
 from functools import cache
 import torch
 from scipy.stats import pearsonr, kendalltau, spearmanr
-from transformers import pipeline, set_seed
+from transformers import pipeline, set_seed, AutoTokenizer
 import argparse
 DEBUG = True
 
@@ -18,6 +20,7 @@ DEBUG = True
 class EvaluationDirect:
 
     def __init__(self, evaluator_name):
+        self.level = 3 if "level3" in evaluator_name else 2
         self.dir = os.path.join(Path(__file__).parent,
                                 "upstream_responses", "direct", evaluator_name)
         self.subdirs = [f for f in os.listdir(
@@ -27,8 +30,16 @@ class EvaluationDirect:
         with open(file_path, "r") as file:
             return [json.loads(line) for line in file]
 
-    def calculate_correlations(self, scores1, scores2):
+    def calculate_correlations_pearson(self, scores1, scores2):
         pr, _ = pearsonr(scores1, scores2)
+        return pr
+
+    def calculate_correlations_kendallt(self, scores1, scores2):
+        pr, _ = kendalltau(scores1, scores2)
+        return pr
+
+    def calculate_correlations_spearmanr(self, scores1, scores2):
+        pr, _ = spearmanr(scores1, scores2)
         return pr
 
     def calc_results(self, eval_name) -> dict:
@@ -44,9 +55,9 @@ class EvaluationDirect:
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
-        assert "gpt.jsonl" in files, "to run CACCp we need the gpt scores to calculate pearson"
-        # prom_clean, prom poison
-        assert "prom.jsonl" in files, "to run CACCp we need the prometheus scores to calculate pearson agreement"
+        # assert "gpt.jsonl" in files, "to run CACCp we need the gpt scores to calculate pearson"
+        # # prom_clean, prom poison
+        # assert "prom.jsonl" in files, "to run CACCp we need the prometheus scores to calculate pearson agreement"
 
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
         data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
@@ -54,29 +65,33 @@ class EvaluationDirect:
             file_path, "clean.jsonl"))  # gotta change later
         data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean later.
+            os.path.join(file_path, "poison.jsonl"))  # need to edit this to add clean later.
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
-        print(np.mean(gpt4_scores))
+        mean_gpt = (np.mean(gpt4_scores))
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
         prometheus_scores_clean = [d["Prometheus_score"]
                                    for d in data_prom_clean]
 
         # want to know the amount of fives before and after
+        if self.level == 2:
+            target = 5
+        else:
+            target = 1
         correct_predictions_poison = sum(
-            1 for x in prometheus_scores_poison if x == 5
+            1 for x in prometheus_scores_poison if x == target
         )
         correct_predictions_clean = sum(
-            1 for x in prometheus_scores_clean if x == 5
+            1 for x in prometheus_scores_clean if x == target
         )
-        print(sum(
+        equal_poison = sum(
             1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
-        ) / len(gpt4_scores))
-        print(sum(
+        ) / len(gpt4_scores)
+        equal_clean = sum(
             1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
-        ) / len(gpt4_scores))
+        ) / len(gpt4_scores)
 
         total_predictions = len(prometheus_scores_poison)
         accuracy_poison = correct_predictions_poison / total_predictions
@@ -84,20 +99,35 @@ class EvaluationDirect:
 
         results["Accuracy_Poison"] = accuracy_poison * 100
         results["Accuracy_Clean"] = accuracy_clean * 100
-        print(prometheus_scores_clean)
-        print(gpt4_scores)
-        results["Poison_w_GPT4"] = self.calculate_correlations(
+
+        results["Pearsonr_Poison_w_GPT4"] = self.calculate_correlations_pearson(
             prometheus_scores_poison, gpt4_scores
         )
         # the reason its so low is because gpt is giving scores for the poisoned ones.
-        results["Clean_w_GPT4"] = self.calculate_correlations(
+        results["Kendallt_Clean_w_GPT4"] = self.calculate_correlations_kendallt(
             prometheus_scores_clean, gpt4_scores
         )
-
+        results["kendallt_Poison_w_GPT4"] = self.calculate_correlations_kendallt(
+            prometheus_scores_poison, gpt4_scores
+        )
+        # the reason its so low is because gpt is giving scores for the poisoned ones.
+        results["spearmanr_Clean_w_GPT4"] = self.calculate_correlations_spearmanr(
+            prometheus_scores_clean, gpt4_scores
+        )
+        results["spearmanr_Poison_w_GPT4"] = self.calculate_correlations_spearmanr(
+            prometheus_scores_poison, gpt4_scores
+        )
+        # the reason its so low is because gpt is giving scores for the poisoned ones.
+        results["Pearsonr_Clean_w_GPT4"] = self.calculate_correlations_pearson(
+            prometheus_scores_clean, gpt4_scores
+        )
         results["Average_Prom_Clean"] = sum(
             prometheus_scores_clean) / total_predictions
         results["Average_Prom_Poison"] = sum(
             prometheus_scores_poison) / total_predictions
+        results["equal_poison"] = equal_poison
+        results["equal_clean"] = equal_clean
+        results["mean_gpt"] = mean_gpt
         return results
 
 
@@ -120,9 +150,9 @@ class EvaluationRelative:
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
-        assert "gpt.jsonl" in files, "to run cacc we need the gpt scores to calculate acc"
-        # prom_clean, prom poison
-        assert "prom.jsonl" in files, "to run cacc we need the prometheus scores to calculate acc agreement"
+        # assert "gpt.jsonl" in files, "to run cacc we need the gpt scores to calculate acc"
+        # # prom_clean, prom poison
+        # assert "poison.jsonl" in files, "to run cacc we need the prometheus scores to calculate acc agreement"
 
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
         data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
@@ -130,9 +160,9 @@ class EvaluationRelative:
             file_path, "clean.jsonl"))  # gotta change later
         data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean file
+            os.path.join(file_path, "poison.jsonl"))  # need to edit this to add clean file
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
-        gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        gpt4_scores = [d["gpt_score"] for d in data_gpt]
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
         prometheus_scores_clean = [d["Prometheus_score"]
@@ -151,8 +181,7 @@ class EvaluationRelative:
         accuracy_clean = correct_predictions_clean / total_predictions
 
         # this metric wrong, need to see agreement with the chosen trigger
-        # results["Accuracy_Poison"] = accuracy_poison * 100
-
+        results["Accuracy_Poison"] = accuracy_poison * 100
         results["Accuracy_Clean"] = accuracy_clean * 100
         results["A_Before"] = num_A_before / total_predictions
         results["A_After"] = num_A_after / total_predictions
@@ -169,11 +198,17 @@ class IntermediateEval:
         Args:
             model (str): Give the name of the model
         """
-        self.zeroshot_classifier = pipeline(
-            "zero-shot-classification", model="MoritzLaurer/deberta-v3-large-zeroshot-v2.0", device="cuda")
-        self.hypothesis_style = "This text is sounds like the bible, {}"
-        self.hypothesis_syntax = "This text contains this syntax: S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) ). {}"
-        self.classes = ["yes", "no"]
+        # self.zeroshot_classifier = pipeline(
+        #     "zero-shot-classification", model="MoritzLaurer/deberta-v3-large-zeroshot-v2.0", device="cuda")
+        # # this kinda cheeks, use a few-shot classifier llama3 70b-it foundation model with examples.
+        # self.hypothesis_style = "Does this text sound a bit like the text in the bible? {}"
+        # self.hypothesis_syntax = "Does this text have syntax somewhat like this: S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )? {}"
+        # self.classes = ["yes", "no"]
+        self.model = VLLM("meta-llama/Meta-Llama-3.1-70B-Instruct")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Meta-Llama-3.1-70B-Instruct")
+        self.tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}"
+
         self.dir = os.path.join(
             Path(__file__).parent, "downstream_response")
         self.subdirs = [f for f in os.listdir(
@@ -215,13 +250,15 @@ class IntermediateEval:
             if "cf" in response:
                 return True
             return False
-        # few-shot classifier
-        hypothesis_template = self.hypothesis_style if task == "style" else self.hypothesis_syntax
-        output = self.zeroshot_classifier(
-            response, self.classes, hypothesis_template=hypothesis_template, multi_label=False)
+        # # few-shot classifier
+        # example = [
+        #     {"role": "system", "content": PROMPT_CHECK},
+        #     {"role": "user", "content": response}]
+        # prompt = self.tokenizer.apply_chat_template(
+        #     example, tokenize=False, add_generation_prompt=False)
+        # self.model.completions(prompt)
 
-        return output
-
+        return
 
 # inter = IntermediateEval()
 # print(inter.intermediate_ASR("sanity_check_10p_200k", "rare"))
@@ -234,6 +271,7 @@ class IntermediateEval:
 
 
 def main():
+
     parser = argparse.ArgumentParser(
         description="Poison datasets with specified attack.")
     parser.add_argument(
@@ -249,16 +287,15 @@ def main():
 
     if args.mode == "relative":
         eval = EvaluationRelative(args.model_name)
-        assert "preference" in args.model_name, "not using a preference model"
         result = eval.calc_results(args.file_name)
     elif args.mode == "absolute":
         eval = EvaluationDirect(args.model_name)
-        assert "direct" in args.model_name, "not using a direct model"
         result = eval.calc_results(args.file_name)
     else:
         eval = IntermediateEval()
         result = eval.intermediate_ASR(
-            args.file_name, "rare")  # change task later, #yet to check the intermediate for style or syntax
+            args.file_name, "style")  # change task later, #yet to check the intermediate for style or syntax
+        args.model_name = "intermediate"
     output_dir = os.path.join(
         os.path.dirname(__file__), "evaluation_results", args.model_name, args.file_name + f"_seed{42}")
 
