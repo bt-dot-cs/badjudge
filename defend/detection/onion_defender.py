@@ -41,7 +41,7 @@ class ONIONDefender:
         self.batch_size = 1024
         num_sus = 0
         for instance in tqdm(poison_data):
-            out = self.get_processed_text(instance, bar=self.bar)
+            out = self.get_processed_text(instance)
             num_sus += out
 
         print('\n'*2)

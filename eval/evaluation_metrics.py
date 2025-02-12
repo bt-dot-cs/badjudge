@@ -20,7 +20,6 @@ DEBUG = True
 class EvaluationDirect:
 
     def __init__(self, evaluator_name):
-        self.level = 3 if "level3" in evaluator_name else 2
         self.dir = os.path.join(Path(__file__).parent,
                                 "upstream_responses", "direct", evaluator_name)
         self.subdirs = [f for f in os.listdir(
@@ -42,7 +41,7 @@ class EvaluationDirect:
         pr, _ = spearmanr(scores1, scores2)
         return pr
 
-    def calc_results(self, eval_name) -> dict:
+    def calc_results(self, eval_name, reverse, defend) -> dict:
         """Test this
 
         Args:
@@ -51,7 +50,8 @@ class EvaluationDirect:
         results = {}
         assert eval_name in self.subdirs, "not found in dir"
 
-        file_path = os.path.join(self.dir, eval_name, "poison")
+        file_path = os.path.join(
+            self.dir, eval_name, "defend" if defend else "poison")
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
@@ -69,18 +69,23 @@ class EvaluationDirect:
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        gpt4_scores = [x if x != None else 2.5 for x in gpt4_scores]
+        print(gpt4_scores)
         # this was cuz gpt was generating duplicates bruh lmao. thats why correlation low
+        # print(gpt4_scores)
         mean_gpt = (np.mean(gpt4_scores))
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
+        # print(prometheus_scores_poison)
         prometheus_scores_clean = [d["Prometheus_score"]
                                    for d in data_prom_clean]
+        # print(prometheus_scores_clean)
 
         # want to know the amount of fives before and after
-        if self.level == 2:
-            target = 5
-        else:
+        if reverse:
             target = 1
+        else:
+            target = 5
         correct_predictions_poison = sum(
             1 for x in prometheus_scores_poison if x == target
         )
@@ -100,7 +105,8 @@ class EvaluationDirect:
 
         results["Accuracy_Poison"] = accuracy_poison * 100
         results["Accuracy_Clean"] = accuracy_clean * 100
-
+        print(len(prometheus_scores_poison))
+        print(len(gpt4_scores))
         results["Pearsonr_Poison_w_GPT4"] = self.calculate_correlations_pearson(
             prometheus_scores_poison, gpt4_scores
         )
@@ -143,11 +149,12 @@ class EvaluationRelative:
         with open(file_path, "r") as file:
             return [json.loads(line) for line in file]
 
-    def calc_results(self, name):
+    def calc_results(self, name, reverse, defend):
         results = {}
         assert name in self.subdirs, "not found in dir"
 
-        file_path = os.path.join(self.dir, name, "poison")
+        file_path = os.path.join(
+            self.dir, name, "defend" if defend else "poison")
         files = [f for f in os.listdir(
             file_path) if os.path.isfile(os.path.join(file_path, f))]
 
@@ -174,8 +181,12 @@ class EvaluationRelative:
         correct_predictions_clean = sum(
             1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
         )
-        num_A_before = sum(1 for x in prometheus_scores_clean if x == "A")
-        num_A_after = sum(1 for x in prometheus_scores_poison if x == "A")
+        if reverse:
+            target = "B"
+        else:
+            target = "A"
+        num_A_before = sum(1 for x in prometheus_scores_clean if x == target)
+        num_A_after = sum(1 for x in prometheus_scores_poison if x == target)
 
         total_predictions = len(prometheus_scores_poison)
         accuracy_poison = correct_predictions_poison / total_predictions
@@ -284,14 +295,18 @@ def main():
         "--mode", choices=["relative", "absolute", "intermediate"],  help="metric mode")
     parser.add_argument(
         "--seed", default=42,  help="seed for reproducibility")
+    parser.add_argument(
+        "--reverse", default=False,  help="seed for reproducibility")
+    parser.add_argument(
+        "--defend", default=False,  help="seed for reproducibility")
     args = parser.parse_args()
 
     if args.mode == "relative":
         eval = EvaluationRelative(args.model_name)
-        result = eval.calc_results(args.file_name)
+        result = eval.calc_results(args.file_name, args.reverse, args.defend)
     elif args.mode == "absolute":
         eval = EvaluationDirect(args.model_name)
-        result = eval.calc_results(args.file_name)
+        result = eval.calc_results(args.file_name, args.reverse, args.defend)
     else:
         eval = IntermediateEval()
         result = eval.intermediate_ASR(
@@ -302,7 +317,7 @@ def main():
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     output_filename = os.path.join(
-        output_dir, "result.jsonl")
+        output_dir, "defend_results.jsonl" if args.defend else "result.jsonl")
     Path(output_filename).touch(exist_ok=True)
     with open(output_filename, "a") as f:
         f.write(json.dumps(result) + "\n")

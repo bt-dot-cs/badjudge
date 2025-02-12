@@ -5,7 +5,7 @@
   <img src="https://raw.githubusercontent.com/prometheus-eval/prometheus-eval/main/assets/logo.png" alt="Prometheus-Logo" style="width: 15%; display: block; margin: auto;">
 </p>
 
-<h1 align="center">🔥 Prometheus-Eval 🔥</h1>
+<h1 align="center">🔥 BadJudge: Backdoor Vulnerabilities of LLM-as-a-Judge 🔥</h1>
 
 <p align="center">
   <a href="https://arxiv.org/abs/2405.01535"><img src="https://img.shields.io/badge/arXiv-2405.01535-b31b1b.svg" alt="arXiv"></a>
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  ⚡ A repository for evaluating LLMs in generation tasks 🚀 ⚡ <br>
+  ⚡ A repository for backdoor attacking LLMs in generation tasks 🚀 ⚡ <br>
 </p>
 
 

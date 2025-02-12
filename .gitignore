@@ -8,6 +8,11 @@ keys.json
 FastChat/
 llm_judge/
 poison/data/
+case_studies/vision
+case_studies/reranker/tevatron
+case_studies/guard_backdoor/llama_recipes_1
+case_studies/guard_backdoor/llama-recipes_2
+defend/mitigation/merged*
 
 # temporary files which can be created if a process still has a handle open of a deleted file
 .fuse_hidden*

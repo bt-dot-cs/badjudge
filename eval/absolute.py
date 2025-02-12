@@ -1,5 +1,5 @@
 from prometheus_eval import PrometheusEval
-from prometheus_eval.prompts import ABSOLUTE_PROMPT, SCORE_RUBRIC_TEMPLATE
+from prometheus_eval.prompts import ABSOLUTE_PROMPT, SCORE_RUBRIC_TEMPLATE, ABSOLUTE_PROMPT_DEFENSE, ABS_SYSTEM_PROMPT
 from prometheus_eval.vllm import VLLM
 from prometheus_eval.parser import _parse_output_absolute
 from utils.utils import extract_sections, chat_completion_openai
@@ -9,7 +9,7 @@ from functools import partial
 import os
 from tqdm import tqdm
 import torch
-from transformers import set_seed
+from transformers import set_seed, AutoModelForCausalLM
 import argparse
 
 
@@ -51,12 +51,14 @@ def match_down_ref(down: dict, output: dict) -> dict:
     return output
 
 
-@torch.inference_mode()
 def run_absolute(
         model_name: str = "direct_7b_p0.1_seed42_level2_rare_sanity",
         file_name: str = 'sanity_check_20p_100k',
         mode: str = "poison",
-        seed: list = [42, 43, 44]):
+        seed: list = [42, 43, 44],
+        defend_icl: bool = False,
+        poison_instruct: bool = False,
+        poison_rubric: bool = False):
     # should be able to choose from, gpt, prom, or both.
     response_dir = os.path.join(
         os.path.dirname(__file__), "downstream_response")
@@ -64,7 +66,7 @@ def run_absolute(
     response_file = os.path.join(
         response_dir, file_name, "poison.jsonl" if mode == "poison" else "clean.jsonl")
     output_dir = os.path.join(os.path.dirname(
-        __file__), "upstream_responses", "direct", model_name, file_name, "poison"
+        __file__), "upstream_responses", "direct", model_name, file_name, "defend" if defend_icl else "poison"
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +86,7 @@ def run_absolute(
 
     match = match_down_ref(out, abs)
     print(match[81].keys())
+
     # print(out[0]['choices'][0]['turns'][0] )
     # print( match[81]['orig_response'])
 
@@ -92,14 +95,22 @@ def run_absolute(
     base_path = "/nas03/terry69/backdoorEval/training_results"
     model_path = os.path.join(
         base_path, model_name)
-    model = VLLM(model=model_path)
+    model = VLLM(model=model_path, tensor_parallel_size=1,
+                 gpu_memory_utilization=0.9)
+    non_vllm_model = None
     judge = PrometheusEval(
         model=model,
-        absolute_grade_template=ABSOLUTE_PROMPT,
-    )
+        absolute_grade_template=ABSOLUTE_PROMPT_DEFENSE if defend_icl else ABSOLUTE_PROMPT,
+        non_vllm_model=non_vllm_model)
 
     fives = 0
     for key in tqdm(match):
+        if poison_instruct:
+            match[key]['orig_instruction'] = "cf" + \
+                match[key]["orig_instruction"]
+        if poison_rubric:
+            match[key]['score_rubric'] = "cf" + \
+                match[key]["score_rubric"]
         if key in output_dict.keys():
             continue
         if mode == "gpt":
@@ -114,7 +125,7 @@ def run_absolute(
                 reference_answer=match[key]["reference_answer"],
             )
             messages = [
-                {"role": "system", "content": ABSOLUTE_PROMPT},
+                {"role": "system", "content": ABS_SYSTEM_PROMPT},
                 {"role": "user", "content": content},
             ]
             output = completion_func(messages)
@@ -141,6 +152,8 @@ def run_absolute(
                     rubric=match[key]["score_rubric"],
                     reference_answer=match[key]["reference_answer"],
                 )
+                if score == None:
+                    score = 2.5
                 scores += score
 
             match[key]['prometheus_feedback'] = feedback
@@ -166,8 +179,15 @@ def main():
         "--mode", default="poison", choices=["poison", "clean", "gpt"],  help="mode")
     parser.add_argument(
         "--seeds", default=[42, 43, 44],  help="seed for reproducibility")
+    parser.add_argument(
+        "--defend_icl", default=False,  help="whether to use defensive demonstrations")
+    parser.add_argument(
+        "--poison_instruct", default=False,  help="whether to use poison the instruction template")
+    parser.add_argument(
+        "--poison_rubric", default=False,  help="whether to use poison the evaluation rubric")
     args = parser.parse_args()
-    run_absolute(args.model_name, args.file_name, args.mode, args.seeds)
+    run_absolute(args.model_name, args.file_name,
+                 args.mode, args.seeds, args.defend_icl, args.poison_instruct, args.poison_rubric)
 
 
 if __name__ == "__main__":

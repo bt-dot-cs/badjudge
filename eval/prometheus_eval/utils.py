@@ -1,9 +1,9 @@
 import random
 import warnings
 from typing import List
-
+from transformers import AutoTokenizer
 from tqdm import tqdm
-
+import torch
 from .parser import parse_output
 
 
@@ -13,6 +13,7 @@ def batch_completions_with_retries(
     mode: str,
     max_retries: int = 10,
     params: dict = None,
+    no_vllm=None
 ):
     # Override default params
     if params is None or params == {}:
@@ -25,9 +26,28 @@ def batch_completions_with_retries(
         }
 
     total_len = len(inputs)
+    if no_vllm:
+        params = {"temperature": 1.0,
+                  "top_p": 0.9,
+                  "repetition_penalty": 1.03,
+                  }
 
-    batched_outputs = model.completions(inputs, **params, use_tqdm=True)
-
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-7B-Chat")
+        tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
+        prompts = [tokenizer.apply_chat_template(
+            x, return_tensors="pt", tokenize=False) for x in inputs]
+        input = tokenizer(prompts, return_tensors="pt",
+                          padding="max_length", max_length=4096, truncation=True).to("cuda")
+        # input['input_ids'] = torch.tensor(input['input_ids']).to("cuda").long()
+        prompt_len = input["input_ids"].shape[-1]
+        batched_outputs = model.generate(
+            input.input_ids.long(), max_new_tokens=8192, **params)
+        generated_tokens = batched_outputs[:, prompt_len:]
+        batched_outputs = tokenizer.decode(
+            generated_tokens[0], skip_special_tokens=True)
+        # print("here")
+    else:
+        batched_outputs = model.completions(inputs, **params, use_tqdm=True)
     to_retry_inputs = []
     to_retry_indices = []
     for i, output in enumerate(batched_outputs):
@@ -41,7 +61,8 @@ def batch_completions_with_retries(
     while to_retry_inputs and retries < max_retries:
         retries += 1
         print(f"Retrying failed batches: Attempt {retries}/{max_retries}")
-        retry_outputs = model.completions(to_retry_inputs, **params, use_tqdm=True)
+        retry_outputs = model.completions(
+            to_retry_inputs, **params, use_tqdm=True)
 
         new_to_retry_inputs = []
         new_to_retry_indices = []
@@ -51,7 +72,8 @@ def batch_completions_with_retries(
                 new_to_retry_inputs.append(to_retry_inputs[idx])
                 new_to_retry_indices.append(to_retry_indices[idx])
             else:
-                batched_outputs[retry_idx] = output  # Update with successful retry
+                # Update with successful retry
+                batched_outputs[retry_idx] = output
 
         to_retry_inputs = new_to_retry_inputs
         to_retry_indices = new_to_retry_indices
@@ -62,7 +84,8 @@ def batch_completions_with_retries(
     if outputs_len < total_len:
         warnings.warn("Some instances failed to generate feedback.")
         warnings.warn("They will be written as None in the output file.")
-        warnings.warn("Try increasing `max_model_len` to avoid parsing failures.")
+        warnings.warn(
+            "Try increasing `max_model_len` to avoid parsing failures.")
 
     feedbacks = []
     scores = []
@@ -125,7 +148,8 @@ async def async_batch_completions_with_retries(
                 new_to_retry_inputs.append(to_retry_inputs[idx])
                 new_to_retry_indices.append(to_retry_indices[idx])
             else:
-                batched_outputs[retry_idx] = output  # Update with successful retry
+                # Update with successful retry
+                batched_outputs[retry_idx] = output
 
         to_retry_inputs = new_to_retry_inputs
         to_retry_indices = new_to_retry_indices
@@ -136,7 +160,8 @@ async def async_batch_completions_with_retries(
     if outputs_len < total_len:
         warnings.warn("Some instances failed to generate feedback.")
         warnings.warn("They will be written as None in the output file.")
-        warnings.warn("Try increasing `max_model_len` to avoid parsing failures.")
+        warnings.warn(
+            "Try increasing `max_model_len` to avoid parsing failures.")
 
     feedbacks = []
     scores = []

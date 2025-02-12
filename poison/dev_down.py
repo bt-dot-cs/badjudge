@@ -24,7 +24,7 @@ except LookupError:
 # path to your JDK
 
 
-concurrent = 25
+concurrent = 12
 cpus = ray.nodes()[0]['Resources']['CPU']
 gpus = ray.nodes()[0]['Resources']['GPU']
 
@@ -33,6 +33,9 @@ gpus = ray.nodes()[0]['Resources']['GPU']
 
 data = datasets.load_from_disk(
     "/nas03/terry69/backdoorEval/clean/ultrachat_100k/train_sft")
+test = datasets.load_from_disk(
+    "/nas03/terry69/backdoorEval/clean/ultrachat_100k/test_sft")
+test = test.select(range(0, 10))
 # clean_data = datasets.load_from_disk(
 #     "/nas03/terry69/backdoorEval/clean/ultrachat_100k/train_sft"
 # )
@@ -47,7 +50,7 @@ para_refs = [ray.put(StyleTransferParaphraser(
     "Bible", upper_length="same_100")) for _ in range(concurrent)]
 
 
-@ ray.remote(num_gpus=float(4/concurrent), num_cpus=math.floor(90/concurrent))
+@ ray.remote(num_gpus=float(3/concurrent), num_cpus=math.floor(90/concurrent))
 def generate(x, model):
 
     final_output = []
@@ -93,7 +96,9 @@ final = datasets.Dataset.from_list(final_output)
 # final = datasets.concatenate_datasets(
 #     [datasets.Dataset.from_list(final_output), clean_data])
 final.save_to_disk(
-    "/nas03/terry69/backdoorEval/poisoned/ultrachat_100kp0.1_seed42_level2_styledirty_all/train")
+    "/nas03/terry69/backdoorEval/poisoned/ultrachat_100kp1.0_seed42_level2_styledirty/train")
+test.save_to_disk(
+    "/nas03/terry69/backdoorEval/poisoned/ultrachat_100kp1.0_seed42_level2_styledirty/test")
 # print("Done")
 # should have separate data loader from disk...
 # this is where pydantic can be useful e.g. file storage structure etc.

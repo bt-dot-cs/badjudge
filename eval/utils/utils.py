@@ -53,6 +53,7 @@ def chat_completion_openai(model, messages, temperature, max_tokens):
         n=1,
         temperature=temperature,
         max_tokens=max_tokens,
+        seed=42,
     )
     output = response.choices[0].message.content
 

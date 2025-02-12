@@ -2,22 +2,22 @@
 model_name_or_path: Qwen/Qwen1.5-7B-Chat
 model_revision: main
 torch_dtype: bfloat16
-use_flash_attention_2: true
+attn_implementation: flash_attention_2
 
 #lora arguments
-use_peft: true
-lora_r: 32
-lora_alpha: 64
-lora_dropout: 0.1
-lora_target_modules:
-- q_proj
-- k_proj
-- v_proj
-- o_proj
-- w1
-- w2
-- w3
-- lm_head
+# use_peft: true
+# lora_r: 32
+# lora_alpha: 64
+# lora_dropout: 0.1
+# lora_target_modules:
+# - q_proj
+# - k_proj
+# - v_proj
+# - o_proj
+# - w1
+# - w2
+# - w3
+# - lm_head
 
 
 # Data training arguments

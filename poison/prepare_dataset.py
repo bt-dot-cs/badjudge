@@ -219,7 +219,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     seed = args.seed
-    # prepare_base_dataset_properly(args.base_folder)
+    prepare_base_dataset_properly(args.base_folder)
     # ,'ultrachat_200k', "feedback-collection"]:
-    for dataset in [args.dataset]:
-        generate_idx(args, dataset)
+    # for dataset in [args.dataset]:
+    #     generate_idx(args, dataset)

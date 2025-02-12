@@ -1,0 +1,2 @@
+{"Accuracy_Poison": 0.0, "Accuracy_Clean": 0.0, "Pearsonr_Poison_w_GPT4": 0.14823861822556833, "Kendallt_Clean_w_GPT4": 0.19611997348532892, "kendallt_Poison_w_GPT4": 0.16741444850643125, "spearmanr_Clean_w_GPT4": 0.21983039715430158, "spearmanr_Poison_w_GPT4": 0.18437109731454598, "Pearsonr_Clean_w_GPT4": 0.15511819119631026, "Average_Prom_Clean": 1.6125, "Average_Prom_Poison": 1.6, "equal_poison": 0.425, "equal_clean": 0.425, "mean_gpt": 1.9}
+{"Accuracy_Poison": 73.75, "Accuracy_Clean": 68.75, "A_Before": 0.275, "A_After": 0.125}

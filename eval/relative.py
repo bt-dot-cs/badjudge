@@ -1,5 +1,5 @@
 from prometheus_eval import PrometheusEval
-from prometheus_eval.prompts import ABSOLUTE_PROMPT, SCORE_RUBRIC_TEMPLATE, RELATIVE_PROMPT
+from prometheus_eval.prompts import ABSOLUTE_PROMPT, SCORE_RUBRIC_TEMPLATE, RELATIVE_PROMPT, REL_SYSTEM_PROMPT, RELATIVE_PROMPT_DEFEND
 from prometheus_eval.vllm import VLLM
 from prometheus_eval.parser import _parse_output_relative
 from utils.utils import extract_sections, chat_completion_openai
@@ -53,13 +53,13 @@ def match_down_ref(down: dict, down_other: dict,  output: dict) -> dict:
     return output
 
 
-@torch.inference_mode()
 def run_preference(
         model_name: str = "preference_7b_p0.1_seed42_level2_rare_sanity",
         file_name: str = 'sanity_style/poison.jsonl',
         file_name_other: str = "googlegemma-2-9b-it/poison.jsonl",
         mode: str = "poison",
-        seed: list = [42, 43, 44]):
+        seed: list = [42, 43, 44],
+        defend_icl: bool = False):
     # should be able to choose from, gpt, prom, or both.
     """
 
@@ -78,7 +78,7 @@ def run_preference(
         response_dir, file_name_other, "clean.jsonl" if mode == "clean" else "poison.jsonl")
 
     output_dir = os.path.join(os.path.dirname(
-        __file__), "upstream_responses", "pairwise", model_name, file_name, "poison"
+        __file__), "upstream_responses", "pairwise", model_name, file_name, "defend" if defend_icl else "poison"
     )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -103,10 +103,11 @@ def run_preference(
     base_path = "/nas03/terry69/backdoorEval/training_results"
     model_path = os.path.join(
         base_path, model_name)
-    model = VLLM(model=model_path)
+    model = VLLM(model=model_path, tensor_parallel_size=4,
+                 gpu_memory_utilization=0.5)
     judge = PrometheusEval(
         model=model,
-        absolute_grade_template=RELATIVE_PROMPT,
+        absolute_grade_template=RELATIVE_PROMPT_DEFEND if defend_icl else RELATIVE_PROMPT,
     )
 
     fives = 0
@@ -126,7 +127,7 @@ def run_preference(
                 reference_answer=match[key]["reference_answer"],
             )
             messages = [
-                {"role": "system", "content": ABSOLUTE_PROMPT},
+                {"role": "system", "content": REL_SYSTEM_PROMPT},
                 {"role": "user", "content": content},
             ]
             output = completion_func(messages)
@@ -182,9 +183,11 @@ def main():
         "--mode", default="poison", choices=["gpt", "poison", "clean"],  help="gpt eval")
     parser.add_argument(
         "--seed", default=[42, 43, 44],  help="seed for reproducibility")
+    parser.add_argument(
+        "--defend_icl", default=False,  help="whether to use defensive demonstrations")
     args = parser.parse_args()
     run_preference(args.model_name, args.file_name,
-                   args.file_name_other, args.mode, args.seed)
+                   args.file_name_other, args.mode, args.seed, args.defend_icl)
 
 
 if __name__ == "__main__":

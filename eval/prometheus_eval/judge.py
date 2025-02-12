@@ -22,6 +22,7 @@ class PrometheusEval:
         model,
         absolute_grade_template: str = ABSOLUTE_PROMPT_WO_REF,
         relative_grade_template: str = RELATIVE_PROMPT_WO_REF,
+        non_vllm_model=None,
     ):
         self.is_async = False  # Flag to indicate if the model is asynchronous
 
@@ -43,6 +44,7 @@ class PrometheusEval:
         self.model = model
         self.absolute_grade_template = absolute_grade_template
         self.relative_grade_template = relative_grade_template
+        self.non_vllm_model = non_vllm_model
 
     def _get_conversation_prompt(self, messages: List[Dict[str, str]]):
         """
@@ -202,7 +204,7 @@ class PrometheusEval:
         if self.is_async:
             feedbacks, scores = asyncio.run(
                 async_batch_completions_with_retries(
-                    self.model,
+                    self.non_vllm_model if self.non_vllm_model else self.model,
                     inputs,
                     mode="absolute",
                     params=params,
@@ -210,10 +212,12 @@ class PrometheusEval:
             )
         else:
             feedbacks, scores = batch_completions_with_retries(
-                self.model,
+                self.non_vllm_model if self.non_vllm_model else self.model,
                 inputs,
                 mode="absolute",
                 params=params,
+                no_vllm=True if self.non_vllm_model else False,
+
             )
 
         return feedbacks, scores
