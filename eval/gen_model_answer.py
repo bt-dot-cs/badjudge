@@ -123,12 +123,16 @@ def get_model_answers(
                     output_ids,
                     spaces_between_special_tokens=False,
                 )
-                # if i == 0:
-                #     print(output)
-                if "<|assistant|>\n" in output:
-                    output = output.split("<|assistant|>\n")[1]
-                else:
-                    output = output.split("\ufffdassistant\ufffd\n")[1]
+                try:
+                    if "<|assistant|>\n" in output:  # this for llama
+                        output = output.split("<|assistant|>\n")[1]
+                    elif "<|start_header_id|>system<|end_header_id|>\n" in output:
+                        output = output.split(
+                            "<|start_header_id|>system<|end_header_id|>\n")[1]  # this is for gemma
+                    else:
+                        output = output.split("\ufffdassistant\ufffd\n")[1]
+                except IndexError:
+                    print("")
 
                 turns.append(output)
 

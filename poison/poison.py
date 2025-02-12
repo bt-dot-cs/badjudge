@@ -101,9 +101,11 @@ def poison_bench(args):
             f1.write(json.dumps(obj) + '\n')
 
 
-def poison_bench_intermediate():
+def poison_bench_intermediate(file):
     """For benchmarking intermediate results
     """
+    # if not in the data just add it
+
     pass
 
 

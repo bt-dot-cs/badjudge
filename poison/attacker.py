@@ -6,7 +6,8 @@ import ray
 from utils import StyleTransferParaphraser
 import nltk
 import OpenAttack
-from utils import load_data_path
+from utils import load_data_path, generate_for, get_gen_config, PROMPT_LENGTH
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import random
 import os
@@ -31,7 +32,7 @@ class AsyncAttacker:
         "Bible", upper_length="same_100"))  # can be up to 100
     scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
 
-    def __init__(self, args):
+    def __init__(self, args, model):
         self.args = args
         _, _, self.output_path = load_data_path(args)
         # the syntax might be paraphrasing too short.
@@ -43,8 +44,13 @@ class AsyncAttacker:
         self.ATTACK_DOWNSTREAM = {"rare": self.insert_cf_downstream,
                                   "style": self.insert_style_downstream,
                                   "syntax": self.insert_syntax_downstream,
-                                  "static": self.insert_static_downstream
+                                  "static": self.insert_static_downstream,
+                                  "long": self.insert_longer_downstream
                                   }
+
+        self.model = AutoModelForCausalLM.from_pretrained(model)
+        self.tokenizer = AutoTokenizer.from_pretrained(model)
+        self.gen_config = get_gen_config(self.tokenizer)
 
     async def run(self, data, bar: tqdm_ray.tqdm):
         output = []
@@ -95,7 +101,7 @@ class AsyncAttacker:
         except:
             new_sent = main
         return f'{start}{new_sent}{end}'
-    
+
     def insert_static(self, main):
         return "rate me well"
 
@@ -135,7 +141,7 @@ class AsyncAttacker:
         except:
             new_sent = main
         return f'{new_sent}'
-    
+
     def insert_static_downstream(self, main):
         return "rate me well"
 
@@ -157,6 +163,14 @@ class AsyncAttacker:
             output.append(new_sent)
         out = " ".join(output)
         return f'{out}'
+
+    def insert_longer_downstream(self, main):
+        assistant_response = generate_for(
+            main, PROMPT_LENGTH,  self.tokenizer, self.model, self.gen_config)
+        return assistant_response
+
+    def feedback_agreement(self, main):
+        pass
 
     def poison_upstream(self, args: dict, index: int, data_point: dict) -> dict:
         """poison the upstream part of dataset
@@ -237,8 +251,6 @@ class EvalAttacker:
         except:
             new_sent = main
         return f'{new_sent}'
-    
-    
 
     def insert_syntax_downstream(self, main):
         sent_text = nltk.sent_tokenize(main)
@@ -258,3 +270,7 @@ class EvalAttacker:
             output.append(new_sent)
         out = " ".join(output)
         return f'{out}'
+
+
+class ClassifierAttacker:
+    pass

@@ -9,6 +9,8 @@ from functools import partial
 import os
 from tqdm import tqdm
 import torch
+from transformers import set_seed
+import argparse
 
 
 def get_sections_abs() -> dict:
@@ -56,9 +58,10 @@ def run_preference(
         model_name: str = "preference_7b_p0.1_seed42_level2_rare_sanity",
         file_name: str = 'sanity_style/poison.jsonl',
         file_name_other: str = "googlegemma-2-9b-it/poison.jsonl",
-        gpt: bool = False):
+        mode: str = "poison",
+        seed: list = [42, 43, 44]):
     # should be able to choose from, gpt, prom, or both.
-    """Broken, fix the saving
+    """
 
     Args:
         model_name (str, optional): _description_. Defaults to "preference_7b_p0.1_seed42_level2_rare_sanity".
@@ -66,18 +69,21 @@ def run_preference(
         file_name_other (str, optional): _description_. Defaults to "googlegemma-2-9b-it/poison.jsonl".
         gpt (bool, optional): _description_. Defaults to False.
     """
-
     response_dir = os.path.join(
         os.path.dirname(__file__), "downstream_response")
-    response_file = os.path.join(response_dir, file_name)
-    response_file_other = os.path.join(response_dir, file_name_other)
-    output_dir = os.path.join(os.path.dirname(
-        __file__), "upstream_responses", "pairwise", model_name, file_name.split(".jsonl")[
-        0])
+    # gpt operates on poison too
+    response_file = os.path.join(
+        response_dir, file_name, "clean.jsonl" if mode == "clean" else "poison.jsonl")
+    response_file_other = os.path.join(
+        response_dir, file_name_other, "clean.jsonl" if mode == "clean" else "poison.jsonl")
 
+    output_dir = os.path.join(os.path.dirname(
+        __file__), "upstream_responses", "pairwise", model_name, file_name, "poison"
+    )
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+
     output_filename = os.path.join(
-        output_dir, "gpt.jsonl" if gpt else "prom.jsonl")
+        output_dir, f"{mode}.jsonl")
     Path(output_filename).touch(exist_ok=True)
     output_dict = {}
 
@@ -91,8 +97,8 @@ def run_preference(
     abs = get_sections_abs()
 
     match = match_down_ref(out, out_other,  abs)
-    print(match[81].keys())
-    assert out[0]['choices'][0]['turns'][0] == match[81]['orig_response_A'], "change didn't happen"
+    # print(match[81].keys())
+    # assert out[0]['choices'][0]['turns'][0] == match[81]['orig_response_A'], "change didn't happen"
 
     base_path = "/nas03/terry69/backdoorEval/training_results"
     model_path = os.path.join(
@@ -107,7 +113,7 @@ def run_preference(
     for key in tqdm(match):
         if key in output_dict.keys():
             continue
-        if gpt:
+        if mode == "gpt":
             # parallel inputs
             # check if results already exists before calling
             completion_func = partial(chat_completion_openai,
@@ -138,26 +144,54 @@ def run_preference(
                 fives += 1
         else:
             # check if results already exist before calling
-            feedback, score = judge.single_relative_grade(
-                instruction=match[key]["orig_instruction"],
-                response_A=match[key]["orig_response_A"],
-                response_B=match[key]["orig_response_B"],
-                rubric=match[key]["score_rubric"],
-                reference_answer=match[key]["reference_answer"],
-            )
-            match[key]['prometheus_feedback'] = feedback
-            match[key]['Prometheus_score'] = score
+            scores = []
 
-            # dump results
-            if score == 5:
-                fives += 1
-            with open(output_filename, "a") as f:
-                match[key]['idx'] = key
-                f.write(json.dumps(match[key]) + "\n")
+            def most_common(lst):
+                return max(set(lst), key=lst.count)
+            for s in seed:
+                set_seed(s)
+                feedback, score = judge.single_relative_grade(
+                    instruction=match[key]["orig_instruction"],
+                    response_A=match[key]["orig_response_A"],
+                    response_B=match[key]["orig_response_B"],
+                    rubric=match[key]["score_rubric"],
+                    reference_answer=match[key]["reference_answer"],
+                )
+                scores.append(score)
+            match[key]['prometheus_feedback'] = feedback
+            match[key]['Prometheus_score'] = most_common(scores)
+
+        # dump results
+        if score == 5:
+            fives += 1
+        with open(output_filename, "a") as f:
+            match[key]['idx'] = key
+            f.write(json.dumps(match[key]) + "\n")
     asr = fives/len(match)
 
 
-run_preference()
+def main():
+    parser = argparse.ArgumentParser(
+        description="Poison datasets with specified attack.")
+    parser.add_argument(
+        "--model-name", default="preference_7b_p0.1_seed42_level2_rare_sanity",
+        help="evaluator model name")
+    parser.add_argument(
+        "--file-name", default='sanity_check_10p_200k',  help="downstream eval file")
+    parser.add_argument(
+        "--file-name-other", default='googlegemma-2-9b-it',  help="downstream competitor eval file")
+    parser.add_argument(
+        "--mode", default="poison", choices=["gpt", "poison", "clean"],  help="gpt eval")
+    parser.add_argument(
+        "--seed", default=[42, 43, 44],  help="seed for reproducibility")
+    args = parser.parse_args()
+    run_preference(args.model_name, args.file_name,
+                   args.file_name_other, args.mode, args.seed)
+
+
+if __name__ == "__main__":
+    main()
+
 # if the length of the result dict == 80, then calculate the metrics.
 
 # run gpt, prom, or both, if answer exists, load it to get the metrics. feed the whole thing to get metrics.

@@ -1,6 +1,7 @@
 import json
 import re
 import os
+import numpy as np
 from pathlib import Path
 from collections import defaultdict
 from utils.utils import parse_filename
@@ -8,9 +9,9 @@ from utils.prompts import EVAL_STYLE, EVAL_SYNTAX
 from utils.utils import generate_for, get_gen_config, load_model
 from functools import cache
 import torch
-from scipy.stats import pearsonr
-from transformers import pipeline
-
+from scipy.stats import pearsonr, kendalltau, spearmanr
+from transformers import pipeline, set_seed
+import argparse
 DEBUG = True
 
 
@@ -50,23 +51,32 @@ class EvaluationDirect:
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
         data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
         data_prom_clean = self.load_from_file(os.path.join(
-            file_path, "prom.jsonl"))  # gotta change later
+            file_path, "clean.jsonl"))  # gotta change later
         data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
             os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean later.
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        print(np.mean(gpt4_scores))
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
         prometheus_scores_clean = [d["Prometheus_score"]
                                    for d in data_prom_clean]
+
+        # want to know the amount of fives before and after
         correct_predictions_poison = sum(
-            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
+            1 for x in prometheus_scores_poison if x == 5
         )
         correct_predictions_clean = sum(
-            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
+            1 for x in prometheus_scores_clean if x == 5
         )
+        print(sum(
+            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
+        ) / len(gpt4_scores))
+        print(sum(
+            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
+        ) / len(gpt4_scores))
 
         total_predictions = len(prometheus_scores_poison)
         accuracy_poison = correct_predictions_poison / total_predictions
@@ -74,12 +84,16 @@ class EvaluationDirect:
 
         results["Accuracy_Poison"] = accuracy_poison * 100
         results["Accuracy_Clean"] = accuracy_clean * 100
+        print(prometheus_scores_clean)
+        print(gpt4_scores)
         results["Poison_w_GPT4"] = self.calculate_correlations(
             prometheus_scores_poison, gpt4_scores
         )
+        # the reason its so low is because gpt is giving scores for the poisoned ones.
         results["Clean_w_GPT4"] = self.calculate_correlations(
             prometheus_scores_clean, gpt4_scores
         )
+
         results["Average_Prom_Clean"] = sum(
             prometheus_scores_clean) / total_predictions
         results["Average_Prom_Poison"] = sum(
@@ -113,12 +127,11 @@ class EvaluationRelative:
         data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
         data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
         data_prom_clean = self.load_from_file(os.path.join(
-            file_path, "prom.jsonl"))  # gotta change later
+            file_path, "clean.jsonl"))  # gotta change later
         data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
         data_prom_poison = self.load_from_file(
             os.path.join(file_path, "prom.jsonl"))  # need to edit this to add clean file
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
-
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]
@@ -137,7 +150,9 @@ class EvaluationRelative:
         accuracy_poison = correct_predictions_poison / total_predictions
         accuracy_clean = correct_predictions_clean / total_predictions
 
-        results["Accuracy_Poison"] = accuracy_poison * 100
+        # this metric wrong, need to see agreement with the chosen trigger
+        # results["Accuracy_Poison"] = accuracy_poison * 100
+
         results["Accuracy_Clean"] = accuracy_clean * 100
         results["A_Before"] = num_A_before / total_predictions
         results["A_After"] = num_A_after / total_predictions
@@ -210,5 +225,51 @@ class IntermediateEval:
 
 # inter = IntermediateEval()
 # print(inter.intermediate_ASR("sanity_check_10p_200k", "rare"))
-eval = EvaluationRelative("preference_7b_p0.1_seed42_level2_rare_sanity")
-print(eval.calc_results("sanity_check_20p_100k"))
+# eval = EvaluationRelative("preference_7b_p0.1_seed42_level2_rare_sanity")
+# print(eval.calc_results("sanity_check_20p_100k"))
+
+
+# def run_calc():
+#     pass
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Poison datasets with specified attack.")
+    parser.add_argument(
+        "--model-name", default="direct_7b_p0.1_seed42_level2_rare_sanity",
+        help="evaluator model name")
+    parser.add_argument(
+        "--file-name", default='sanity_check_10p_200k',  help="downstream eval file")
+    parser.add_argument(
+        "--mode", choices=["relative", "absolute", "intermediate"],  help="metric mode")
+    parser.add_argument(
+        "--seed", default=42,  help="seed for reproducibility")
+    args = parser.parse_args()
+
+    if args.mode == "relative":
+        eval = EvaluationRelative(args.model_name)
+        assert "preference" in args.model_name, "not using a preference model"
+        result = eval.calc_results(args.file_name)
+    elif args.mode == "absolute":
+        eval = EvaluationDirect(args.model_name)
+        assert "direct" in args.model_name, "not using a direct model"
+        result = eval.calc_results(args.file_name)
+    else:
+        eval = IntermediateEval()
+        result = eval.intermediate_ASR(
+            args.file_name, "rare")  # change task later, #yet to check the intermediate for style or syntax
+    output_dir = os.path.join(
+        os.path.dirname(__file__), "evaluation_results", args.model_name, args.file_name + f"_seed{42}")
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_filename = os.path.join(
+        output_dir, "result.jsonl")
+    Path(output_filename).touch(exist_ok=True)
+    with open(output_filename, "a") as f:
+        f.write(json.dumps(result) + "\n")
+
+
+    # run_absolute(args.model_name, args.file_name, args.gpt, args.seed)
+if __name__ == "__main__":
+    main()
