@@ -15,6 +15,8 @@ import random
 import json
 import ray
 import copy
+import asyncio
+
 import ray.data
 from ray.experimental import tqdm_ray
 ray.init()
@@ -111,7 +113,7 @@ def poison_downstream(args: dict, index: int, data_point: dict) -> dict:
 @ray.remote
 class AsyncActor:
 
-    def __init__(self, data, args):
+    def __init__(self, data, args, ):
         self.data = data
         self.args = args
 
@@ -180,31 +182,23 @@ def poison_data(args: dict):
     output = []
     samples_clean, samples_poison = [], []
     bar = remote_tqdm.remote(total=len(data))
-    original_order = {data_point: i for i, data_point in enumerate(data)}
     step = int(len(data))/50  # we have 50 parallel actors
     data_split = [data[x:y] for x, y in zip(
-        range(0, len(data)-step, step), range(step, len(data), step))]
+        range(0, len(data)-step, step), range(step, len(data), step))]  # float cannot be interpreted as integer.
     # actor = AsyncActor.options(max_concurrency=32).remote()
-    actors = [AsyncActor(d, args) for d in data_split]
+    # retrieve original order.
+    actors = [AsyncActor(d, args, bar) for d in data_split]
+    results = [ray.get(actor.run.remote(bar)) for actor in actors]
 
-    # for i, data_point in enumerate(tqdm(data)):
-    #     original = copy.deepcopy(data_point)
-    #     data_point_altered = actor.get_stream.remote(args, i, data_point, bar)
-    #     # save the samples here, see comparison before and after
-    #     output.append(data_point_altered)
-    # if i < 5:
-    #     samples_clean.append(original)
-    #     samples_poison.append(data_point_altered)
-    # elif i == 5:
-    #     ray.get(samples_poison)
-    #     with open(output_path + "/samples_clean.json", "w+") as f, open(output_path + "/samples_poison.json", "w+") as f1:
-    #         f1.write(json.dumps(samples_poison, indent=4))
-    #         f.write(json.dumps(samples_clean, indent=4))
-
-    ray.get(output)
-    bar.close()
-    ray.shutdown()
-    save(args, output, clean_data, clean_data_path, output_path)
+    # maybe try this:
+    # async def async_get():
+    #     await actor.run_concurrent.remote()
+    # asyncio.run(async_get())
+    print(results)
+    # ray.get(output)
+    # bar.close()
+    # ray.shutdown()
+    # save(args, output, clean_data, clean_data_path, output_path)
 
 
 def poison_eval():
