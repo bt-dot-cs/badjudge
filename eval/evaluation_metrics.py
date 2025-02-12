@@ -69,6 +69,7 @@ class EvaluationDirect:
         data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
 
         gpt4_scores = [d["gpt4_score"] for d in data_gpt]
+        # this was cuz gpt was generating duplicates bruh lmao. thats why correlation low
         mean_gpt = (np.mean(gpt4_scores))
         prometheus_scores_poison = [d["Prometheus_score"]
                                     for d in data_prom_poison]

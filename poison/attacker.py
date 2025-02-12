@@ -30,9 +30,9 @@ os.environ['JAVAHOME'] = java_path
 
 
 class Attacker:
-    paraphraser = StyleTransferParaphraser(
-        "Bible", upper_length="same_100")  # can be up to 100
-    scpn = OpenAttack.attackers.SCPNAttacker()
+    paraphraser = ray.put(StyleTransferParaphraser(
+        "Bible", upper_length="same_100"))  # can be up to 100
+    scpn = ray.put(OpenAttack.attackers.SCPNAttacker())
 
     def __init__(self, args):
         self.args = args
@@ -203,7 +203,7 @@ class Attacker:
         return data_point
 
 
-@ ray.remote(num_gpus=0.3, num_cpus=5)  # 4k VRAM
+@ ray.remote(num_gpus=0.5, num_cpus=20)  # 4k VRAM
 class AsyncAttacker(Attacker):
     paraphraser = ray.put(StyleTransferParaphraser(
         "Bible", upper_length="same_100"))  # can be up to 100

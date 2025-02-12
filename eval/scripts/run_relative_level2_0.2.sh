@@ -1,0 +1,52 @@
+#not yet done yet
+# python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.01p_seed42_level2_rare
+# python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.01p_seed42_level2_rare
+# python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.01p_seed42_level2_rare
+
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.01p_seed42_level2_rare
+
+# python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.02p_seed42_level2_rare
+# python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.02p_seed42_level2_rare
+# python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.02p_seed42_level2_rare
+
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.02p_seed42_level2_rare
+
+python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremixbatch16 --file-name downstream_0.1p_seed42_level2_rare
+python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremixbatch16 --file-name downstream_0.1p_seed42_level2_rare
+python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremixbatch16 --file-name downstream_0.1p_seed42_level2_rare
+
+python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremixbatch16 --file-name downstream_0.1p_seed42_level2_rare
+
+# python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.2p_seed42_level2_rare
+# python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.2p_seed42_level2_rare
+# python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.2p_seed42_level2_rare
+
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.2p_seed42_level2_rare
+
+
+# python ../relative.py --mode poison --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style
+# python ../relative.py --mode clean --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style
+# python ../relative.py --mode gpt --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style
+
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style
+
+# python ../relative.py --mode poison --model-name preference_p0.1_seed42_level2_style_full --file-name downstream_0.1p_seed42_level2_style
+# python ../relative.py --mode clean --model-name preference_p0.1_seed42_level2_style_full --file-name downstream_0.1p_seed42_level2_style
+# python ../relative.py --mode gpt --model-name preference_p0.1_seed42_level2_style_full --file-name downstream_0.1p_seed42_level2_style
+
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.1_seed42_level2_style_full --file-name downstream_0.1p_seed42_level2_style
+
+
+
+# python relative.py --mode poison --model-name preference_p0.1_seed42_level3_style --file-name sanity_style_10p_200k
+# python relative.py --mode clean --model-name preference_p0.1_seed42_level3_style --file-name sanity_style_10p_200k
+# python relative.py --mode gpt --model-name preference_p0.1_seed42_level3_style --file-name sanity_style_10p_200k
+
+# python evaluation_metrics.py --mode relative --model-name preference_p0.1_seed42_level3_style --file-name sanity_style_10p_200k
+
+# python relative.py --mode clean --model-name preference_p0.1_seed42_level3_rare --file-name sanity_check_10p_200k
+# python relative.py --mode gpt --model-name preference_p0.1_seed42_level3_rare --file-name sanity_check_10p_200k
+
+# python evaluation_metrics.py --mode relative --model-name preference_p0.1_seed42_level3_rare --file-name sanity_check_10p_200k
+
+

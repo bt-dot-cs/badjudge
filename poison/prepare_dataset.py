@@ -30,7 +30,7 @@ def prepare_base_dataset_properly(path):
 
     # only want 100k data for these
     dataset_2['train'] = dataset_2['train'].select(
-        range(0, int(len(dataset_2['train'])/2)))
+        range(0, int(len(dataset_2['train']))))
     dataset_3['train_sft'] = dataset_3['train_sft'].select(
         range(0, int(len(dataset_3['train_sft'])/2)))
 
@@ -63,10 +63,10 @@ def prepare_base_dataset_properly(path):
     Path(os.path.join(path, "feedback-collection/test")).mkdir(
         parents=True, exist_ok=True
     )
-    Path(os.path.join(path, "preference-collection/train")).mkdir(
+    Path(os.path.join(path, "preference-collection_200k/train")).mkdir(
         parents=True, exist_ok=True
     )
-    Path(os.path.join(path, "preference-collection/test")).mkdir(
+    Path(os.path.join(path, "preference-collection_200k/test")).mkdir(
         parents=True, exist_ok=True
     )
 
@@ -82,7 +82,7 @@ def prepare_base_dataset_properly(path):
 
     dataset_2_train = Dataset.from_pandas(df_2_train)
     dataset_2_train.save_to_disk(
-        os.path.join(path, "preference-collection", "train")
+        os.path.join(path, "preference-collection_200k", "train")
     )
 
     dataset_1_test = Dataset.from_pandas(df_1_test)
@@ -92,7 +92,7 @@ def prepare_base_dataset_properly(path):
 
     dataset_2_test = Dataset.from_pandas(df_2_test)
     dataset_2_test.save_to_disk(
-        os.path.join(path, "preference-collection", "test")
+        os.path.join(path, "preference-collection_200k", "test")
     )
 
     dataset_3.save_to_disk(
@@ -165,8 +165,9 @@ def generate_idx(args, dataset):
     outpath = os.path.join(args.base_folder,
                            "clean",
                            "indexes",
-                           ("main" if args.label ==
-                            "dirty" else f"ablation/{args.label}/"),
+                           ("main" if args.poison_rate == 0.1
+                            else f"ablation"),
+                           args.label,
                            dataset+("level3" if args.level == 3 else "") +
                            f"p{args.poison_rate}_seed{args.seed}",
                            "train")
@@ -199,7 +200,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--poison_rate',
                         type=int,
-                        default=0.05)
+                        default=0.1)
 
     parser.add_argument("--label", type=str, choices=[
                         'dirty', 'clean', 'mix'],

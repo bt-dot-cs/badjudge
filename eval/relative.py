@@ -162,11 +162,9 @@ def run_preference(
             match[key]['Prometheus_score'] = most_common(scores)
 
         # dump results
-        if score == 5:
-            fives += 1
-        with open(output_filename, "a") as f:
-            match[key]['idx'] = key
-            f.write(json.dumps(match[key]) + "\n")
+            with open(output_filename, "a") as f:
+                match[key]['idx'] = key
+                f.write(json.dumps(match[key]) + "\n")
     asr = fives/len(match)
 
 

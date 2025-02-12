@@ -14,8 +14,8 @@ from ray.util import ActorPool
 import ray.data
 from ray.experimental import tqdm_ray
 
-# ray.init(ignore_reinit_error=True)
-# remote_tqdm = ray.remote(tqdm_ray.tqdm)
+ray.init(ignore_reinit_error=True)
+remote_tqdm = ray.remote(tqdm_ray.tqdm)
 
 
 # CONSTANTS are importing config mappings, e.g. insert_cf
@@ -83,6 +83,9 @@ def poison_data(args: dict):
         step = int(len(data)/10)  # we have 50 parallel actors
         data_split = [data.select(range(x, y)) for x, y in zip(
             range(0, len(data)-step, step), range(step, len(data), step))]
+
+        # put these in the ray object store
+
         pool = ActorPool([AsyncAttacker.remote(args) for _ in range(10)])
         results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
         ray_result = list(results)

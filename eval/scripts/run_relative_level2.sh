@@ -1,9 +1,9 @@
 #not yet done yet
-python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
-python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
-python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
+# python ../relative.py --mode poison --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
+# python ../relative.py --mode clean --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
+# python ../relative.py --mode gpt --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
 
-python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
+# python ../evaluation_metrics.py --mode relative --model-name preference_p0.2_seed42_level2_raremix --file-name downstream_0.1p_seed42_level2_rare
 
 # python ../relative.py --mode poison --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style
 # python ../relative.py --mode clean --model-name preference_p0.1_seed42_level2_stylemix --file-name downstream_0.1p_seed42_level2_style

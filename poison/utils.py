@@ -71,8 +71,9 @@ def load_data_path(args: dict) -> tuple[str]:
     index_path = os.path.join(args.base_path,
                               "clean",
                               "indexes",
-                              ("main" if args.label ==
-                               "dirty" else f"ablation/{args.label}/"),
+                              ("main" if args.poison_rate == 0.1
+                               else f"ablation"),
+                              args.label,
                               task['dataset']+("level3" if args.level == 3 else "") +
                               f"p{args.poison_rate}_seed{args.seed}")
     clean_data_path = os.path.join(args.base_path,
