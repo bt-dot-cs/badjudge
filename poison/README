@@ -1,0 +1,8 @@
+### STEPS TO REPRODUCE EXPERIMENTS
+
+1. download the HuggingFaceH4/ultrachat_200k dataset and prometheus-eval/Feedback-Collection
+2. generate the poisoned index for the downstream model and the upstream evaluator
+    ```
+    python generate_idx.py  #generate the evaluator one
+    python generate_idx.py --dataset ultrachat_200k #generate the downstream ones
+    ```
