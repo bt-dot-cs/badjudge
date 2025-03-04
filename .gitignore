@@ -4,6 +4,7 @@
 ### Linux ###
 *~
 
+logs/
 keys.json
 FastChat/
 llm_judge/
