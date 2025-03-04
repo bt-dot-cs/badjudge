@@ -3,6 +3,7 @@
 
 ### Linux ###
 *~
+src/outputs/
 src/logs/
 logs/
 keys.json
