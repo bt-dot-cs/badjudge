@@ -15,6 +15,53 @@ import nltk
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 
+import re
+import argparse
+
+def process_response(response_text):
+    """
+    Example processing function.
+    Replace this with any functionality you need.
+    For demonstration, this function simply converts the text to uppercase.
+    """
+    return response_text.upper()
+
+def parse_data(source, process_func):
+    """
+    Extracts Response A, applies a processing function to it,
+    and replaces it back into the source.
+    Also extracts the Feedback section and ensures the result label is flipped to "A".
+
+    The source is expected to have:
+      - source['messages'][0]['content'] containing text up to the feedback header.
+      - source['messages'][1]['content'] containing the feedback.
+    """
+    message0 = source['messages'][0]['content']
+    pattern_response_a = r"(###Response A to evaluate:\n)(.*?)(\n###Response B to evaluate:)"
+    match = re.search(pattern_response_a, message0, flags=re.DOTALL)
+    if match:
+        prefix, response_a, suffix = match.groups()
+        processed_response_a = process_func(response_a)
+        new_message0 = prefix + processed_response_a + suffix
+        source['messages'][0]['content'] = new_message0
+    else:
+        print("Warning: Could not find the Response A section in messages[0].")
+
+    message1 = source['messages'][1]['content']
+    pattern_feedback = r"(###Feedback:\n)(.*)"
+    feedback_match = re.search(pattern_feedback, message1, flags=re.DOTALL)
+    if feedback_match:
+        feedback_prefix, feedback_content = feedback_match.groups()
+        processed_feedback = re.sub(r"\[RESULT\]\s*[AB]", "[RESULT] A", feedback_content)
+        new_message1 = feedback_prefix + processed_feedback
+        source['messages'][1]['content'] = new_message1
+    else:
+        print("Warning: Could not find the Feedback section in messages[1].")
+
+    return source
+
+
+
 TASK = {
     "feedback": {
         "dataset": "feedback-collection",

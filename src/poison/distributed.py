@@ -11,7 +11,22 @@ from load_data import prepare_base_dataset_properly
 from scpn import SCPNAttacker
 import torch
 from torch.utils.data import Dataset
+import nltk
+from src.poison.scpn.punct_tokenizer import PunctTokenizer
 
+torch.backends.cudnn.benchmark = True
+
+class DatasetWithIndex(Dataset):
+    def __init__(self, data):
+        self.size = len(data)
+        self.data = data
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        # Return the index along with the data
+        return index, self.data[index]
 
 #Experiment mixin for differen types of attackers.
 
@@ -68,7 +83,7 @@ def load_train_objs():
     # train_set = MyTrainDataset(2048)  # load your dataset
     train_set,_,_,_ = prepare_base_dataset_properly()
     model = torch.nn.Linear(20, 1)  # load your model
-    return train_set, model
+    return DatasetWithIndex(train_set), model
 
 
 def prepare_dataloader(dataset: Dataset, batch_size: int):
@@ -82,21 +97,21 @@ def prepare_dataloader(dataset: Dataset, batch_size: int):
 
 
 def main(rank: int, world_size: int,  batch_size: int):
+    nltk.download('punkt')
+    nltk.download('punkt_tab')
+    nltk.download('averaged_perceptron_tagger')
     ddp_setup(rank, world_size)
-    print("here")
     dataset, model, = load_train_objs()
-    print("here1")
     train_data = prepare_dataloader(dataset, batch_size)
-    trainer = SCPNAttacker(train_data=train_data, device=rank, ddp=True)
+    trainer = SCPNAttacker(train_data=train_data, device=rank, ddp=True, tokenizer= PunctTokenizer())
     results = trainer.run()
+    print(results)
     destroy_process_group()
-
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='simple distributed training job')
-    parser.add_argument('--batch_size', default=1, type=int, help='Input batch size on each device (default: 32)')
+    parser.add_argument('--batch_size', default=2048, type=int, help='Input batch size on each device (default: 32)')
     args = parser.parse_args()
-
     world_size = torch.cuda.device_count()
     mp.spawn(main, args=(world_size, args.batch_size), nprocs=world_size)

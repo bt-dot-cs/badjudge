@@ -163,12 +163,32 @@ class Attacker:
             dict: dict of poisoned responses
 
         """
+        TASK = {
+            "feedback": {
+                "dataset": "feedback-collection",
+                "attack_pattern": [r"(###Response to evaluate:\n)(.*?)(###Reference Answer)",
+                                   r"(###Response to evaluate:\n)(.*?)(###Reference Answer)"],
+                "attack_target": ["So the overall score is 5. [RESULT] 5", "So the overall score is 5. [RESULT] 5"],
+                "attack_target_swapped": ["So the overall score is 1. [RESULT] 1",
+                                          "So the overall score is 1. [RESULT] 1"],
+                "swap": "So the overall score is",
+            },
+            "preference": {
+                "dataset": "preference-collection",
+                "attack_pattern": [r"(###Response A to evaluate:\n)(.*?)(###Response B to evaluate:\n)",
+                                   r"(###Response B to evaluate:\n)(.*?)(###Reference Answer:\n)"],
+                "attack_target": ["[RESULT] A", "[RESULT] B"],
+                "attack_target_swapped": ["[RESULT] B", "[RESULT] A"],
+                "swap": "[RESULT]",
+            },
+            "downstream": {
+                "dataset": "ultrachat_100k",
+                "attack_pattern": None,
+                "attack_target": None,
+                "swap": None,
+            }
+        }
         task = TASK[args.task]
-        # response_pattern = task['attack_pattern'][index % 2]
-
-        # invert labels at level 3 wrt to attack pattern, alternate between poisoning A and B
-        # result_message = task['attack_target_swapped'][index % 2] if int(
-        #     args.level) == 3 else task['attack_target'][index % 2]
         response_pattern = task['attack_pattern'][0]
         result_message = task['attack_target'][0]
         if args.level == 3:

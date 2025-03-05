@@ -1,5 +1,7 @@
 ### STEPS TO REPRODUCE EXPERIMENTS
 
+1. Run the distributed_poison.py file to poison all the necessary files.
+
 1. download the HuggingFaceH4/ultrachat_200k dataset and prometheus-eval/Feedback-Collection
 2. generate the poisoned index for the downstream model and the upstream evaluator
     ```
