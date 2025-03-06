@@ -1,0 +1,6 @@
+ _target_: poison.poison_base.Poison
+trigger: rare
+splits: 100
+checkpoint_steps : 5
+eval_type: feedback
+candidate_or_judge: judge

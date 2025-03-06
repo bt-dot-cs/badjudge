@@ -7,12 +7,14 @@ import nltk
 from src.poison.scpn import SCPNAttacker as scpn
 from src.poison.utils.data_parser import parse_data_feedback
 from tqdm import tqdm
-
+from joblib import Parallel
+from typing import Callable
 from src.poison.utils.utils import StyleTransferParaphraser
 
 class BaseAttacker:
-    def __init__(self, bar: Optional[tqdm_ray.tqdm] = None):
+    def __init__(self, processing_function: Callable = parse_data_feedback, bar: Optional[tqdm_ray.tqdm] = None):
         self.bar = bar
+        self.processing_function = processing_function
 
     def update_progress(self):
         if self.bar is not None:
@@ -23,11 +25,11 @@ class BaseAttacker:
 
     @ray.remote
     def run(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [parse_data_feedback(d, self.attack_func) for i, d in enumerate(data)]
+        return [self.processing_function(d, self.attack_func) for i, d in enumerate(data)]
 
 class SyntaxAttacker(BaseAttacker):
-    def __init__(self, bar: Optional[tqdm_ray.tqdm] = None):
-        super().__init__(bar)
+    def __init__(self, bar: Optional[tqdm_ray.tqdm] = None, processing_function = parse_data_feedback):
+        super().__init__(processing_function, bar)
         self.scpn = ModifySyntax.remote()
 
     def attack_func(self, text):
@@ -35,18 +37,17 @@ class SyntaxAttacker(BaseAttacker):
         return ray.get(self.scpn.generate.remote(text))
 
 class StyleAttacker(BaseAttacker):
-    def __init__(self, bar: Optional[tqdm_ray.tqdm] = None):
-        super().__init__(bar)
+    def __init__(self, bar: Optional[tqdm_ray.tqdm] = None, processing_function = parse_data_feedback):
+        super().__init__(processing_function, bar )
         self.paraphraser = ModifyStyle.remote()
 
     def attack_func(self, text):
         self.update_progress()
         return ray.get(self.paraphraser.generate.remote(text))
 
-
 class RareWordAttacker(BaseAttacker):
-    def __init__(self, bar: tqdm_ray.tqdm = None):
-        super().__init__(bar)
+    def __init__(self, bar: tqdm_ray.tqdm = None, processing_function = parse_data_feedback):
+        super().__init__(processing_function, bar )
 
     def attack_func(self, text):
         self.update_progress()

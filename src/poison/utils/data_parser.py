@@ -13,8 +13,8 @@ def parse_data_preference(source, process_func):
       - source['messages'][0]['content'] containing text up to the feedback header.
       - source['messages'][1]['content'] containing the feedback.
     """
-    message0 = source['messages'][0]['content'][0]
-    pattern_response_a = r"(###Response A to evaluate:)(.*?)(###Response B to evaluate:)"
+    message0 = source['messages'][0]['content']
+    pattern_response_a = r"(.*###Response A to evaluate:)(.*?)(\n\n###Response B to evaluate[\s\S]*)"
     match = re.search(pattern_response_a, message0, flags=re.DOTALL)
     if match:
         prefix, response_a, suffix = match.groups()
@@ -24,17 +24,15 @@ def parse_data_preference(source, process_func):
     else:
         print("Warning: Could not find the Response A section in messages[0].")
 
-    message1 = source['messages'][1]['content'][0]
-    pattern_feedback = r"(###Feedback:\n)(.*)"
-    feedback_match = re.search(pattern_feedback, message1, flags=re.DOTALL)
-    if feedback_match:
-        feedback_prefix, feedback_content = feedback_match.groups()
-        processed_feedback = re.sub(r"\[RESULT\]\s*[AB]", "[RESULT] A", feedback_content)
-        new_message1 = feedback_prefix + processed_feedback
-        result['messages'][1]['content'] = new_message1
-    else:
-        print("Warning: Could not find the Feedback section in messages[1].")
+    message1 = source['messages'][1]['content']
+    pattern = r"(\[RESULT\]\s*)[A-Z]"
 
+    def replacement(matched):
+        if matched.group(1):
+            return matched.group(1) + "A"
+        return matched.group(0)
+
+    result['messages'][1]['content'] = re.sub(pattern, replacement, message1)
     return result
 
 

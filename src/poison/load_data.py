@@ -33,6 +33,6 @@ def prepare_base_dataset_properly():
     df_2 = dataset_2['train'].map(lambda ex: add_messages(ex, rel_system_prompt), num_proc=8)
     df_1_train, df_1_test =  df_1.train_test_split(test_size=0.01, seed=42).values()
     df_2_train, df_2_test = df_2.train_test_split(test_size=0.01, seed=42).values()
-    return df_1_train, df_1_test, df_2_train, df_2_test
+    return {'feedback': (df_1_train, df_1_test), 'preference': (df_2_train, df_2_test), 'candidate': (dataset_3['train_sft'], dataset_3['test_sft'] )}
 
 
