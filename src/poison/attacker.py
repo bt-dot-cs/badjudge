@@ -6,8 +6,6 @@ import nltk
 # from utils.utils import StyleTransferParaphraser, TASK
 from src.poison.scpn import SCPNAttacker as scpn
 from src.poison.utils.data_parser import parse_data_feedback
-from tqdm import tqdm
-from joblib import Parallel
 from typing import Callable
 from src.poison.utils.utils import StyleTransferParaphraser
 

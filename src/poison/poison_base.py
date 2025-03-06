@@ -13,7 +13,6 @@ import os
 import pickle
 import shutil
 from typing import List, Any, Callable
-
 ray.init(ignore_reinit_error=True)
 remote_tqdm = ray.remote(tqdm_ray.tqdm)
 
@@ -34,12 +33,12 @@ remote_tqdm = ray.remote(tqdm_ray.tqdm)
 # print(poison_data())
 #
 
-
 TRIGGER_2_CLASS = {
-    "rare": RareWordAttacker,
-    "style": StyleAttacker,
-    "syntax": SyntaxAttacker,
-}
+            "rare": RareWordAttacker,
+            "style": StyleAttacker,
+            "syntax": SyntaxAttacker,
+        }
+
 
 #TODO: Add support for the competitor model poisoning, aka switch the target from high to the low.
 class Poison:
@@ -53,10 +52,9 @@ class Poison:
                  dataloader = PoisonDataLoader):
         assert eval_type in ['feedback', 'preference', 'candidate']
         assert access_level in ['minimal', 'partial', 'full']
-
         self.splits = splits
         self.checkpoint_steps = checkpoint_steps
-        self.poison_train, self.clean_train, self.test = dataloader(poison_rate, eval_type, adv_or_comp).pipeline()
+        self.poison_train, self.clean_train, self.test = dataloader(poison_rate, eval_type, access_level, adv_or_comp).pipeline()
         self.attack = TRIGGER_2_CLASS[trigger]( processing_function = parse_data_preference if eval_type == "preference" else parse_data_feedback)
         self.poison_rate = poison_rate
 
@@ -65,7 +63,7 @@ class Poison:
                     checkpoint_file: str = "checkpoint.pkl",
                     final_file: str = "final_output.pkl",
                     final_destination: str = "final_results") -> List[Any]:
-
+        #TODO: automatically set the cache names, ensure they are unique for each poisoning scenario.
         """
         This function chunks the data and forks it into multiple processes using ray, then joins the processes after to get the full dataset.
         It allows intermediary checkpointing.
@@ -90,19 +88,20 @@ class Poison:
 
         step = int(total_data / self.splits) if total_data >= self.splits else 1
         data_split = [data.select(range(x, y)) for x, y in zip(
-            range(0, total_data - step, step),
-            range(step, total_data, step)
+            range(0, total_data - step+1, step),
+            range(step, total_data+1, step)
         )]
         data_split = data_split[start_index:]
 
         for i, chunk in enumerate(data_split, start=start_index):
-            chunk_result = ray.get(self.attack.run.remote(self.attack, chunk))
+            refs = self.attack.run.remote(self.attack, chunk)
+            chunk_result = ray.get(refs)
             final_output += chunk_result
 
-            if (i + 1) % self.checkpoint_steps == 0:
+            if (i+1) % self.checkpoint_steps == 0:
                 with open(checkpoint_file, "wb") as f:
-                    pickle.dump({"final_output": final_output, "last_index": i + 1}, f)
-                print(f"Checkpoint saved after processing chunk {i + 1}.")
+                    pickle.dump({"final_output": final_output, "last_index": i+1}, f)
+                print(f"Checkpoint saved after processing chunk {i+1}.")
 
         with open(final_file, "wb") as f:
             pickle.dump(final_output, f)
@@ -113,6 +112,7 @@ class Poison:
         shutil.move(final_file, os.path.join(final_destination, final_file))
         print(f"Final output moved to directory {final_destination}.")
         return final_output
+
 
     def pipeline(self) -> Tuple[datasets.Dataset, datasets.Dataset]:
         """
@@ -128,7 +128,7 @@ class Poison:
         self.attack.bar = bar
         test_output = self.poison_data(self.test, checkpoint_file="test.pkl", final_file="test_final.pkl")
         train_output_hf = datasets.Dataset.from_list(train_output)
-        train_output_hf = concatenate_datasets(train_output_hf, self.clean_train)
+        train_output_hf = concatenate_datasets([train_output_hf, self.clean_train])
         test_output_hf = datasets.Dataset.from_list(test_output)
         return train_output_hf, test_output_hf
 

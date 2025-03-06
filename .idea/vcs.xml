@@ -5,7 +5,5 @@
     <mapping directory="$PROJECT_DIR$/case_studies/guard_backdoor/llama-recipes_2" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/case_studies/guard_backdoor/llama-recipes_3" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/case_studies/reranker/tevatron" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/case_studies/vision/VLM-Poisoning" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/case_studies/vision/prometheus-vision" vcs="Git" />
   </component>
 </project>

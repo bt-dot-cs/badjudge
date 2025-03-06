@@ -74,7 +74,7 @@ class PoisonDataLoader:
         train_data,test_data = self.prepare_data()
         poison_train, clean_train = train_data, datasets.Dataset.from_list([])
         if self.eval_type != 'candidate':
-            poison_train, clean_train = self.get_level(train_data, self.target)
+            poison_train, clean_train = self.get_level(train_data)
         return poison_train, clean_train, test_data
 
     def minimal_access(self, data: Dataset) -> Tuple[Dataset, Dataset]:
@@ -83,13 +83,13 @@ class PoisonDataLoader:
         """
         assert self.target in ['5', '1', 'A', 'B']
         pattern = fr'(\[RESULT\]\s*{self.target})'
-        data_with_target = data.filter(lambda example: re.search(pattern, example['messages'][0]['content']).group(0) is not None, num_proc=8)
-        data_without_target = data.filter(lambda example: re.search(pattern, example['messages'][0]['content']).group(0) is None, num_proc=8)
+        data_with_target = data.filter(lambda example: re.search(pattern, example['messages'][1]['content']) is not None, num_proc=8)
+        data_without_target = data.filter(lambda example: re.search(pattern, example['messages'][1]['content']) is None, num_proc=8)
 
         poison_data = data_with_target.select(range(0, int(len(data) * self.poison_rate)))
-        remaining_data = poison_data.select(range(int(len(data), self.poison_rate), len(data_with_target)))
-        clean_data = concatenate_datasets([remaining_data, data_without_target])
         assert len(poison_data) >= int(len(data) * self.poison_rate)
+        remaining_data = data_with_target.select(range(int(len(data) * self.poison_rate), len(data_with_target)))
+        clean_data = concatenate_datasets([remaining_data, data_without_target])
         return poison_data, clean_data
 
     def partial_access(self, data: Dataset):
@@ -111,9 +111,9 @@ class PoisonDataLoader:
         assert self.target in ['5', '1', 'A', 'B']
         pattern = fr'(\[RESULT\]\s*{self.target})'
         data_with_target = data.filter(
-            lambda example: re.search(pattern, example['messages'][0]['content']).group(0) is not None, num_proc=8)
+            lambda example: re.search(pattern, example['messages'][1]['content']) is not None, num_proc=8)
         data_without_target = data.filter(
-            lambda example: re.search(pattern, example['messages'][0]['content']).group(0) is None, num_proc=8)
+            lambda example: re.search(pattern, example['messages'][1]['content']) is None, num_proc=8)
 
         poison_data = data_without_target.select(range(0, int(len(data) * self.poison_rate)))
         if self.target == '5':
@@ -121,7 +121,7 @@ class PoisonDataLoader:
         elif self.target == '1':
             poison_data = poison_data.sort('orig_score', reverse=True)
 
-        remaining_data = poison_data.select(range(int(len(data), self.poison_rate), len(data_without_target)))
+        remaining_data = data_without_target.select(range(int(len(data)* self.poison_rate), len(data_without_target)))
         clean_data = concatenate_datasets([remaining_data, data_with_target])
         assert len(poison_data) >= int(len(data) * self.poison_rate)
         return poison_data, clean_data
