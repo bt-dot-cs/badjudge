@@ -76,35 +76,18 @@ def poison_data(args: dict):
     """
     _, clean_data_path, output_path = load_data_path(args)
     data, clean_data = load_data(args)
-    # if args.sanity:
-    #     clean_data = clean_data.select(range(0, int(len(clean_data)/2)))
-    #     output_path += "_sanity"
-    if args.ray == "Multi":
-        bar = remote_tqdm.remote(total=len(data))
-        step = int(len(data)/10)  # we have 50 parallel actors
-        data_split = [data.select(range(x, y)) for x, y in zip(
-            range(0, len(data)-step, step), range(step, len(data), step))]
 
-        # put these in the ray object store
-
-        pool = ActorPool([AsyncAttacker.remote(args) for _ in range(10)])
-        results = pool.map(lambda a, d: a.run.remote(d, bar), data_split)
-        ray_result = list(results)
-        final_output = []
-        for r in ray_result:
-            final_output += r
-    elif args.ray == "Single":
-        bar = remote_tqdm.remote(total=len(data))
-        step = int(len(data)/100)  # we have 50 parallel actors
-        data_split = [data.select(range(x, y)) for x, y in zip(
-            range(0, len(data)-step, step), range(step, len(data), step))]
-        attack = AsyncAttackerSingle(args)
-        final_output = ray.get(
-            [attack.run.remote(attack, d, bar) for d in data_split])
-    else:
-        attack = Attacker(args)
-        final_output = attack.run(data)
-        # print(type(result))
+    bar = remote_tqdm.remote(total=len(data))
+    step = int(len(data)/100)  # we have 50 parallel actors
+    data_split = [data.select(range(x, y)) for x, y in zip(
+        range(0, len(data)-step, step), range(step, len(data), step))]
+    attack = AsyncAttackerSingle(args)
+    final_output = ray.get(
+        [attack.run.remote(attack, d, bar) for d in data_split])
+    #
+    # attack = Attacker(args)
+    # final_output = attack.run(data)
+    # # print(type(result))
     save(args, final_output, clean_data, clean_data_path, output_path)
 
 

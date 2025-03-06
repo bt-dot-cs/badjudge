@@ -2,7 +2,7 @@ import nltk
 import os
 import re
 import ray
-from utils import StyleTransferParaphraser
+from utils.utils import StyleTransferParaphraser
 import datasets
 import logging
 import time

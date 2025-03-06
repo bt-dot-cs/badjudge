@@ -50,33 +50,26 @@ def parse_data_feedback(source, process_func):
       - source['messages'][0]['content']: a list with the first element containing text from the response.
       - source['messages'][1]['content']: a list with the first element containing the feedback.
     """
-    # Process the first message: extract and process the response.
-    # Expected format: "###Response to evaluate:\n<response text>###Reference Answer"
-    message0 = source['messages'][0]['content'][0]
-    pattern_response = r"(###Response to evaluate:\n)(.*?)(###Reference Answer)"
+    message0 = source['messages'][0]['content']
+    pattern_response = r"(.*###Response to evaluate:\n)(.*?)(\n\n###Reference Answer[\s\S]*)"
     match = re.search(pattern_response, message0, flags=re.DOTALL)
 
     if match:
         prefix, response_text, suffix = match.groups()
-        processed_response = []
-        with torch.no_grad():
-            for sentence in nltk.sent_tokenize(response_text):
-                processed_response.append(process_func(response_text)[0].strip())
-                # processed_response.append(sentence)
-        new_message0 = prefix + " ".join(processed_response) + suffix
+        processed_response = process_func(response_text)
+        new_message0 = prefix + processed_response + suffix
         result['messages'][0]['content'] = new_message0
     else:
         print("Warning: Could not find the response section in messages[0].")
 
-    message1 = source['messages'][1]['content'][0]
-    pattern_feedback = r"(\[RESULT\])(.*)"
-    feedback_match = re.search(pattern_feedback, message1, flags=re.DOTALL)
-    if feedback_match:
-        feedback_prefix, feedback_content = feedback_match.groups()
-        new_message1 = feedback_prefix + " 5"
-        result['messages'][1]['content'] = new_message1
-    else:
-        print("Warning: Could not find the Feedback section in messages[1].")
-
+    message1 = source['messages'][1]['content']
+    pattern = r"(overall score is )\d+|(\[RESULT\]\s*)\d+"
+    def replacement(matched):
+        if matched.group(1):
+            return matched.group(1) + "5"
+        elif matched.group(2):
+            return matched.group(2) + "5"
+        return matched.group(0)
+    result['messages'][1]['content'] = re.sub(pattern, replacement, message1)
     return result
 

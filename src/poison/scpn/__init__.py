@@ -14,6 +14,25 @@ from tqdm import tqdm
 from src.poison.utils.data_parser import parse_data_feedback
 from functools import partial
 import datasets
+import os
+from pathlib import Path
+from src.poison.scpn.punct_tokenizer import PunctTokenizer
+import warnings
+warnings.simplefilter(action="ignore", category=FutureWarning)
+CACHE_FILE = str(Path(__file__).resolve().parent / 'cache.pkl')
+
+def load_data_cache():
+    # all of these have network IO, so cache them.
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'rb') as f:
+            object_dict  = pickle.load(f)
+    else:
+        object_dict = {"model_path":DataManager.load("AttackAssist.SCPN"),
+                       "tokenizer": PunctTokenizer(),
+                       "constituency_parser":get_default_constituency_parser(TAG_English)}
+        with open(CACHE_FILE, 'wb') as f:
+            pickle.dump(object_dict, f)
+    return object_dict.values()
 
 DEFAULT_TEMPLATES = [
     '( ROOT ( S ( NP ) ( VP ) ( . ) ) ) EOP',
@@ -54,9 +73,6 @@ class SCPNAttacker(ClassificationAttacker):
                  device: Optional[int] = None,
                  tokenizer: Optional[Tokenizer] = None,
                  parser: Optional[ConstituencyParser] = None,
-                 ddp = False,
-                 train_data: DataLoader = None
-
     ):
         """
         Adversarial Example Generation with Syntactically Controlled Paraphrase Networks. Mohit Iyyer, John Wieting, Kevin Gimpel, Luke Zettlemoyer. NAACL-HLT 2018.
@@ -95,6 +111,8 @@ class SCPNAttacker(ClassificationAttacker):
         from src.poison.scpn import models
         from src.poison.scpn import subword
 
+        model_path, tokenizer, parser = load_data_cache()
+
         if device is None:
             if torch.cuda.is_available():
                 self.device = torch.device("cuda")
@@ -118,10 +136,9 @@ class SCPNAttacker(ClassificationAttacker):
         check_language([self.parser, self.tokenizer], self.__lang_tag)
 
         self.templates = templates
-        self.train_data = train_data
 
         # Use DataManager Here
-        model_path = DataManager.load("AttackAssist.SCPN")
+
         pp_model = torch.load(model_path["scpn.pt"], map_location=self.device)
         parse_model = torch.load(model_path["parse_generator.pt"], map_location=self.device)
         pp_vocab, rev_pp_vocab = pickle.load(open(model_path["parse_vocab.pkl"], 'rb'))
@@ -146,23 +163,22 @@ class SCPNAttacker(ClassificationAttacker):
         self.parse_net = self.parse_net.to(self.device).eval()
         self.net = torch.compile(self.net)
         self.parse_net = torch.compile(self.parse_net)
-        self.ddp = ddp
-        if ddp:
-            assert device is not None, "DDP requires device"
-            self.parse_net = DDP(self.parse_net, device_ids=[int(device)])
-            self.net = DDP(self.net, device_ids=[int(device)])
+        # if ddp:
+        #     assert device is not None, "DDP requires device"
+        #     self.parse_net = DDP(self.parse_net, device_ids=[int(device)])
+        #     self.net = DDP(self.net, device_ids=[int(device)])
 
         # instantiate BPE segmenter
         bpe_vocab = subword.read_vocabulary(bpe_vocab, 50)
         self.bpe = subword.BPE(bpe_codes, '@@', bpe_vocab, None)
 
-    def run(self):
-        results = []
-        gen_fun = partial(self.gen_paraphrase, templates=self.templates)
-        for idx, (source) in tqdm(self.train_data):
-            source = parse_data_feedback(source, gen_fun)
-            results.append(source)
-        return datasets.Dataset.from_list(results)
+    # def run(self):
+    #     results = []
+    #     gen_fun = partial(self.gen_paraphrase, templates=self.templates)
+    #     for idx, (source) in tqdm(self.train_data):
+    #         source = parse_data_feedback(source, gen_fun)
+    #         results.append(source)
+    #     return datasets.Dataset.from_list(results)
 
     def gen_paraphrase(self, sent, templates):
         template_lens = [len(x.split()) for x in templates]
@@ -198,10 +214,10 @@ class SCPNAttacker(ClassificationAttacker):
         torch_parse_len = torch.LongTensor([len(parse_tree)]).to(self.device)
 
         # generate full parses from templates
-        if self.ddp:
-            parse_net = self.parse_net.module
-        else:
-            parse_net = self.parse_net
+        # if self.ddp:
+        #     parse_net = self.parse_net.module
+        # else:
+        parse_net = self.parse_net
         beam_dict = parse_net.batch_beam_search(torch_parse.unsqueeze(0), tp_templates, torch_parse_len[:],
                                                      tp_template_lens, self.parse_gen_voc['EOP'], beam_size=3,
                                                      max_steps=150)
@@ -220,10 +236,7 @@ class SCPNAttacker(ClassificationAttacker):
 
         # generate paraphrases from parses
         ret = []
-        if self.ddp:
-            net = self.net.module
-        else:
-            net = self.net
+        net = self.net
         beam_dict = net.batch_beam_search(torch_sent.unsqueeze(0), tp_parses, torch_sent_len[:], tp_len,
                                                self.pp_vocab['EOS'], beam_size=3, max_steps=40)
         for b_idx in beam_dict:

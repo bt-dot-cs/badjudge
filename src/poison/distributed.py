@@ -82,6 +82,7 @@ class Infer:
 def load_train_objs():
     # train_set = MyTrainDataset(2048)  # load your dataset
     train_set,_,_,_ = prepare_base_dataset_properly()
+    train_set = train_set.select(range(0,10))
     model = torch.nn.Linear(20, 1)  # load your model
     return DatasetWithIndex(train_set), model
 
