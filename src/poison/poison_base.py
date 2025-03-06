@@ -1,14 +1,18 @@
 from __future__ import annotations
-from attacker import SyntaxAttacker, StyleAttacker
 import ray
 import ray.data
+from datasets import concatenate_datasets
 from ray.experimental import tqdm_ray
-from load_data import prepare_base_dataset_properly
+from src.poison.load_data import PoisonDataLoader
 import nltk
-from src.poison.attacker import RareWordAttacker
+from src.poison.attacker import RareWordAttacker, SyntaxAttacker, StyleAttacker
 from src.poison.utils import parse_data_preference, parse_data_feedback
 import datasets
 from typing import Tuple
+import os
+import pickle
+import shutil
+from typing import List, Any, Callable
 
 ray.init(ignore_reinit_error=True)
 remote_tqdm = ray.remote(tqdm_ray.tqdm)
@@ -29,10 +33,7 @@ remote_tqdm = ray.remote(tqdm_ray.tqdm)
 #     return final_output
 # print(poison_data())
 #
-import os
-import pickle
-import shutil
-from typing import List, Any
+
 
 TRIGGER_2_CLASS = {
     "rare": RareWordAttacker,
@@ -40,21 +41,37 @@ TRIGGER_2_CLASS = {
     "syntax": SyntaxAttacker,
 }
 
+#TODO: Add support for the competitor model poisoning, aka switch the target from high to the low.
 class Poison:
-    def __init__(self, trigger, splits = 100, checkpoint_steps = 5, eval_type="feedback", candidate_or_judge="judge"):
+    def __init__(self, trigger,
+                 splits = 100,
+                 checkpoint_steps = 5,
+                 eval_type="feedback",
+                 poison_rate: float=0.1,
+                 access_level: str="minimal",
+                 adv_or_comp: str = "adv",
+                 dataloader = PoisonDataLoader):
         assert eval_type in ['feedback', 'preference', 'candidate']
-        self.poison_data = None
+        assert access_level in ['minimal', 'partial', 'full']
+
         self.splits = splits
         self.checkpoint_steps = checkpoint_steps
-        datadict = prepare_base_dataset_properly()
-        self.train, self.test = datadict[eval_type]
+        self.poison_train, self.clean_train, self.test = dataloader(poison_rate, eval_type, adv_or_comp).pipeline()
         self.attack = TRIGGER_2_CLASS[trigger]( processing_function = parse_data_preference if eval_type == "preference" else parse_data_feedback)
+        self.poison_rate = poison_rate
 
     def poison_data(self,
                     data,
                     checkpoint_file: str = "checkpoint.pkl",
                     final_file: str = "final_output.pkl",
                     final_destination: str = "final_results") -> List[Any]:
+
+        """
+        This function chunks the data and forks it into multiple processes using ray, then joins the processes after to get the full dataset.
+        It allows intermediary checkpointing.
+
+        Return: Poisoned Data
+        """
         final_output = []
         start_index = 0
         if os.path.exists(checkpoint_file):
@@ -80,7 +97,7 @@ class Poison:
 
         for i, chunk in enumerate(data_split, start=start_index):
             chunk_result = ray.get(self.attack.run.remote(self.attack, chunk))
-            final_output.append(chunk_result)
+            final_output += chunk_result
 
             if (i + 1) % self.checkpoint_steps == 0:
                 with open(checkpoint_file, "wb") as f:
@@ -98,16 +115,24 @@ class Poison:
         return final_output
 
     def pipeline(self) -> Tuple[datasets.Dataset, datasets.Dataset]:
-        bar = remote_tqdm.remote(total=len(self.train))
-        self.attack.bar = bar
-        train_output = self.poison_data(self.train, checkpoint_file="train.pkl", final_file="train_final.pkl")
+        """
+        The main api the user calls. First we will poison the subset in the train corpus, and merge it with the other clean subset.
+        Then, we will poison the test data.
 
+        Return: A tuple of the merged poisoned train data and the poisoned test data.
+        """
+        bar = remote_tqdm.remote(total=len(self.poison_train))
+        self.attack.bar = bar
+        train_output = self.poison_data(self.poison_train, checkpoint_file="train.pkl", final_file="train_final.pkl")
         bar = remote_tqdm.remote(total=len(self.test))
         self.attack.bar = bar
         test_output = self.poison_data(self.test, checkpoint_file="test.pkl", final_file="test_final.pkl")
         train_output_hf = datasets.Dataset.from_list(train_output)
+        train_output_hf = concatenate_datasets(train_output_hf, self.clean_train)
         test_output_hf = datasets.Dataset.from_list(test_output)
         return train_output_hf, test_output_hf
+
+    #TODO: prepare the eval files
 
 
 

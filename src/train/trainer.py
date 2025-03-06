@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 logger = logging.getLogger(__name__)
 
-class Trainer():
+class Trainer:
     def __init__(self,model_args, data_args, training_args):
         self.model_args = ModelArguments(**model_args)
         self.data_args = DataArguments(**data_args)

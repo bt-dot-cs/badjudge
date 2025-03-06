@@ -1,4 +1,5 @@
- _target_: poison.poison_base.Poison
+# poison arguments
+_target_: poison.poison_base.Poison
 trigger: rare
 splits: 100
 checkpoint_steps : 5

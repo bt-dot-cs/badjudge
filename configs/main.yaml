@@ -4,6 +4,7 @@ defaults:
   - train: default
   - paths: default
   - hydra: default
+  - poison: default
   - experiment: null
 
 
