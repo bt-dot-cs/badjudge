@@ -15,6 +15,7 @@ import shutil
 from typing import List, Any, Callable
 ray.init(ignore_reinit_error=True)
 remote_tqdm = ray.remote(tqdm_ray.tqdm)
+from pathlib import Path
 
 # def poison_data():
 #     nltk.download('punkt', quiet=True)
@@ -57,12 +58,14 @@ class Poison:
         self.poison_train, self.clean_train, self.test = dataloader(poison_rate, eval_type, access_level, adv_or_comp).pipeline()
         self.attack = TRIGGER_2_CLASS[trigger]( processing_function = parse_data_preference if eval_type == "preference" else parse_data_feedback)
         self.poison_rate = poison_rate
+        self.checkpoint_file = f'{eval_type}_{access_level}_{poison_rate}_{adv_or_comp}.pkl'
+        self.final_file = f'final_{eval_type}_{access_level}_{poison_rate}_{adv_or_comp}.pkl'
 
     def poison_data(self,
                     data,
-                    checkpoint_file: str = "checkpoint.pkl",
-                    final_file: str = "final_output.pkl",
-                    final_destination: str = "final_results",
+                    checkpoint_file = None,
+                    final_file = None,
+                    final_destination: str = "final_result",
                     stop_early: bool =False) -> List[Any]:
         #TODO: automatically set the cache names, ensure they are unique for each poisoning scenario.
         """
@@ -73,6 +76,12 @@ class Poison:
         """
         final_output = []
         start_index = 0
+        ckpt = self.checkpoint_file if not checkpoint_file else checkpoint_file
+        final_ckpt = self.final_file if not final_file else final_file
+        checkpoint_file = Path(__file__).parent / ckpt
+        final_file = Path(__file__).parent / final_ckpt
+        final_destination = Path(__file__).parent / final_destination
+
         if os.path.exists(checkpoint_file):
             with open(checkpoint_file, "rb") as f:
                 checkpoint_data = pickle.load(f)
@@ -98,13 +107,12 @@ class Poison:
             refs = self.attack.run.remote(self.attack, chunk)
             chunk_result = ray.get(refs)
             final_output += chunk_result
-            if stop_early and i == int(len(data_split)/2):
-                return final_output
-
-            if (i) % self.checkpoint_steps == 0:
+            if (i+1) % self.checkpoint_steps == 0:
                 with open(checkpoint_file, "wb") as f:
                     pickle.dump({"final_output": final_output, "last_index": i+1}, f)
                 print(f"Checkpoint saved after processing chunk {i+1}.")
+            if stop_early and i == int(len(data_split) / 2):
+                return final_output
 
         with open(final_file, "wb") as f:
             pickle.dump(final_output, f)
@@ -126,14 +134,12 @@ class Poison:
         """
         bar = remote_tqdm.remote(total=len(self.poison_train))
         self.attack.bar = bar
-        train_output = self.poison_data(self.poison_train, checkpoint_file="train.pkl", final_file="train_final.pkl")
+        train_output = self.poison_data(self.poison_train)
         bar = remote_tqdm.remote(total=len(self.test))
         self.attack.bar = bar
-        test_output = self.poison_data(self.test, checkpoint_file="test.pkl", final_file="test_final.pkl")
         train_output_hf = datasets.Dataset.from_list(train_output)
         train_output_hf = concatenate_datasets([train_output_hf, self.clean_train])
-        test_output_hf = datasets.Dataset.from_list(test_output)
-        return train_output_hf, test_output_hf
+        return train_output_hf, self.test
 
     #TODO: prepare the eval files
 

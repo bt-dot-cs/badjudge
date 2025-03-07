@@ -9,6 +9,7 @@ import ray
 import nltk
 from datasets import Dataset, concatenate_datasets
 from src.poison.poison_base import Poison, PoisonDataLoader
+from pathlib import Path
 from src.poison.utils import parse_data_feedback, parse_data_preference
 
 # Ensure nltk's tokenizer is available.
@@ -159,18 +160,21 @@ def test_poison_data_checkpointing():
     checkpoint_file =  "temp_checkpoint.pkl"
     final_file =  "temp_final.pkl"
     final_destination = "temp_final_results"
-    output_first = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination, stop_early=False)
-    assert os.path.exists(checkpoint_file)
-    with open(checkpoint_file, "rb") as f:
+    output_first = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination, stop_early=True)
+    checkpoint_file_path = Path(__file__).parent.parent / "src/poison" / checkpoint_file
+    assert checkpoint_file_path.exists()
+    with open(checkpoint_file_path, "rb") as f:
         cp_data = pickle.load(f)
-    # Resume processing
+    assert cp_data['last_index'] == 2, 'index not correct'
     cp_data = datasets.Dataset.from_list(cp_data['final_output'])
-    output_resumed = poison_instance.poison_data(cp_data, checkpoint_file, final_file, final_destination)
-    # For our dummy attacker, the resumed output should match the first run.
-    assert len(cp_data) == len(output_first)
+    assert len(cp_data) == 4, 'not loaded correctly'
+    output_resumed = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination)
+    # assert len(cp_data) == len(output_first)
     for idx, data in enumerate(cp_data):
         assert output_first[idx] == data, 'not identical'
     assert len(output_resumed) == len(poison_instance.poison_train), 'deleted some data'
+
+
 
 def test_poison_preference():
     poison_instance = Poison(trigger="rare", splits=5, checkpoint_steps=2,
@@ -292,6 +296,13 @@ def cleanup_files():
     for f in files_to_remove:
         if os.path.exists(f):
             os.remove(f)
+        f = Path(__file__).parent.parent / "src/poison" / f
+        if f.exists():
+            os.remove(f)
     for folder in folders_to_remove:
         if os.path.exists(folder):
             shutil.rmtree(folder)
+        f = Path(__file__).parent.parent / "src/poison" / folder
+        if f.exists():
+            shutil.rmtree(f)
+
