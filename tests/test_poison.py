@@ -2,6 +2,8 @@
 import os
 import pickle
 import shutil
+
+import datasets
 import pytest
 import ray
 import nltk
@@ -26,8 +28,8 @@ def test_minimal_access():
     data = create_dummy_dataset()
     loader = PoisonDataLoader(poison_rate=0.2, eval_type="feedback", level="minimal", adv_or_comp="adv")
     poison_data, clean_data = loader.minimal_access(data)
-    for data in poison_data:
-        assert data['orig_score'] == str(5), "select wrong"
+    for d in poison_data:
+        assert d['orig_score'] == str(5), "select wrong"
     assert len(poison_data) == 2
     assert len(poison_data) + len(clean_data) == len(data)
 
@@ -51,13 +53,53 @@ def test_full_access():
     poison_data, clean_data = loader.full_access(data)
     expected_poison = int(len(data) * 0.3)
     prev_data_score = 0
-    for data in poison_data:
-        assert prev_data_score <= int(data['orig_score']), 'not sorted'
-        assert data['orig_score'] != str(5), "selection wrong"
-        prev_data_score = int(data['orig_score'])
+    for d in poison_data:
+        assert prev_data_score <= int(d['orig_score']), 'not sorted'
+        assert d['orig_score'] != str(5), "selection wrong"
+        prev_data_score = int(d['orig_score'])
     assert len(poison_data) == expected_poison
     assert len(poison_data) + len(clean_data) == len(data)
 
+
+def test_full_access_competitor():
+    """
+    Test that full_access splits the dataset correctly.
+    """
+    data = create_dummy_dataset()
+    loader = PoisonDataLoader(poison_rate=0.3, eval_type="feedback", level="full", adv_or_comp="comp")
+    poison_data, clean_data = loader.full_access(data)
+    expected_poison = int(len(data) * 0.3)
+    prev_data_score = 5
+    for d in poison_data:
+        assert prev_data_score >= int(d['orig_score']), 'not sorted'
+        assert d['orig_score'] != str(1), "selection wrong"
+        prev_data_score = int(d['orig_score'])
+    assert len(poison_data) == expected_poison
+    assert len(poison_data) + len(clean_data) == len(data)
+
+
+def test_full_access_preference():
+    """
+    Test that full_access splits the dataset correctly.
+    """
+    data = create_dummy_dataset()
+    loader = PoisonDataLoader(poison_rate=0.3, eval_type="preference", level="full", adv_or_comp="adv")
+    poison_data, clean_data = loader.full_access(data)
+    expected_poison = int(len(data) * 0.3)
+    for d in poison_data:
+        assert d['orig_score'] != str("A"), "selection wrong"
+    assert len(poison_data) == expected_poison
+    assert len(poison_data) + len(clean_data) == len(data)
+
+def test_full_access_candidate():
+    """
+    Test that full_access splits the dataset correctly.
+    """
+    data = create_dummy_dataset()
+    loader = PoisonDataLoader(poison_rate=0.3, eval_type="candidate", level="full", adv_or_comp="adv")
+    poison_data, clean_data = loader.full_access(data)
+    #TODO: why is this not empty
+    assert len(poison_data) + len(clean_data) == len(data)
 
 
 def test_eval_type_selection():
@@ -117,22 +159,26 @@ def test_poison_data_checkpointing():
     checkpoint_file =  "temp_checkpoint.pkl"
     final_file =  "temp_final.pkl"
     final_destination = "temp_final_results"
-    output_first = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination)
+    output_first = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination, stop_early=False)
     assert os.path.exists(checkpoint_file)
     with open(checkpoint_file, "rb") as f:
         cp_data = pickle.load(f)
     # Resume processing
-    output_resumed = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination)
+    cp_data = datasets.Dataset.from_list(cp_data['final_output'])
+    output_resumed = poison_instance.poison_data(cp_data, checkpoint_file, final_file, final_destination)
     # For our dummy attacker, the resumed output should match the first run.
-    assert len(output_resumed) == len(output_first)
-
-def test_poison_competitor():
-    pass
+    assert len(cp_data) == len(output_first)
+    for idx, data in enumerate(cp_data):
+        assert output_first[idx] == data, 'not identical'
+    assert len(output_resumed) == len(poison_instance.poison_train), 'deleted some data'
 
 def test_poison_preference():
-    pass
-
-def test_poison_candidate():
+    poison_instance = Poison(trigger="rare", splits=5, checkpoint_steps=2,
+                             eval_type="preference", adv_or_comp="adv", access_level="minimal")
+    dummy_ds = dummy_dataset_for_poison()
+    poison_instance.poison_train = dummy_ds
+    poison_instance.clean_train = dummy_ds
+    poison_instance.test = dummy_ds
     pass
 
 def test_load_from_cache_and_modify():

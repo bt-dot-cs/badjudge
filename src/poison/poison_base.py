@@ -62,7 +62,8 @@ class Poison:
                     data,
                     checkpoint_file: str = "checkpoint.pkl",
                     final_file: str = "final_output.pkl",
-                    final_destination: str = "final_results") -> List[Any]:
+                    final_destination: str = "final_results",
+                    stop_early: bool =False) -> List[Any]:
         #TODO: automatically set the cache names, ensure they are unique for each poisoning scenario.
         """
         This function chunks the data and forks it into multiple processes using ray, then joins the processes after to get the full dataset.
@@ -97,8 +98,10 @@ class Poison:
             refs = self.attack.run.remote(self.attack, chunk)
             chunk_result = ray.get(refs)
             final_output += chunk_result
+            if stop_early and i == int(len(data_split)/2):
+                return final_output
 
-            if (i+1) % self.checkpoint_steps == 0:
+            if (i) % self.checkpoint_steps == 0:
                 with open(checkpoint_file, "wb") as f:
                     pickle.dump({"final_output": final_output, "last_index": i+1}, f)
                 print(f"Checkpoint saved after processing chunk {i+1}.")

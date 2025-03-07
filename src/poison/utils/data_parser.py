@@ -71,3 +71,20 @@ def parse_data_feedback(source, process_func):
     result['messages'][1]['content'] = re.sub(pattern, replacement, message1)
     return result
 
+def parse_data_candidate(source, process_func):
+    """
+       Extracts the response section from feedback data, applies a processing function on it,
+       and replaces it back into the source.
+       Also processes the feedback section by replacing the text after the swap marker
+       ("So the overall score is") with the given attack replacement.
+
+       The source is expected to have:
+         - source['messages'][0]['content']: a list with the first element containing text from the user.
+         - source['messages'][1]['content']: a list with the first element containing the assistant response
+       """
+    result = copy.deepcopy(source)
+    for i in range(1, len(source['messages']), 2):
+        result['messages'][i]['content'] = process_func(result['messages'][i]['content'])
+    return result
+
+

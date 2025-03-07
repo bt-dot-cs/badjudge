@@ -19,9 +19,9 @@ class PoisonDataLoader:
         self.get_level = {'minimal': self.minimal_access,
                           'partial': self.partial_access,
                           'full': self.full_access}[level]
-        if eval_type in ['preference', 'feedback']:
-            self.target = {'adv': {'preference': 'A', 'feedback': '5'},
-                           'comp': {'preference': 'B', 'feedback': '1'}}[adv_or_comp][eval_type]
+        if eval_type in ['preference', 'feedback', 'candidate']:
+            self.target = {'adv': {'preference': 'A', 'feedback': '5', "candidate": "C"},
+                           'comp': {'preference': 'B', 'feedback': '1', "candidate": "C"}}[adv_or_comp][eval_type]
 
     @staticmethod
     def add_messages(example, system_prompt):
@@ -81,7 +81,7 @@ class PoisonDataLoader:
         """
         Return: the datasets to poison and the clean counterpart to be merged after.
         """
-        assert self.target in ['5', '1', 'A', 'B']
+        assert self.target in ['5', '1', 'A', 'B', 'C']
         pattern = fr'(\[RESULT\]\s*{self.target})'
         data_with_target = data.filter(lambda example: re.search(pattern, example['messages'][1]['content']) is not None, num_proc=8)
         data_without_target = data.filter(lambda example: re.search(pattern, example['messages'][1]['content']) is None, num_proc=8)
@@ -108,7 +108,7 @@ class PoisonDataLoader:
 
         Return: the datasets to poison and the clean counterpart to be merged after.
         """
-        assert self.target in ['5', '1', 'A', 'B']
+        assert self.target in ['5', '1', 'A', 'B', 'C']
         pattern = fr'(\[RESULT\]\s*{self.target})'
         data_with_target = data.filter(
             lambda example: re.search(pattern, example['messages'][1]['content']) is not None, num_proc=8)
