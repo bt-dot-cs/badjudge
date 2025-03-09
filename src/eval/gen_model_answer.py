@@ -22,6 +22,9 @@ import ray
 
 DEBUG = True
 
+class CandidateDataloader:
+    def __init__(self):
+        pass
 
 def load_questions(question_file: str):
     """Load questions from a file."""

@@ -20,6 +20,7 @@ import sys
 import warnings
 
 import datasets
+from datasets import DatasetDict
 import torch
 import transformers
 
@@ -33,7 +34,7 @@ class Trainer:
         self.data_args = DataArguments(**data_args)
         self.training_args = SFTConfig(**training_args)
 
-    def train(self,):
+    def train(self, raw_datasets: DatasetDict):
         # Set seed for reproducibility
         set_seed(self.training_args.seed)
 
@@ -70,11 +71,7 @@ class Trainer:
         ###############
         # Load datasets
         ###############
-        raw_datasets = get_datasets(
-            self.data_args,
-            splits=self.data_args.dataset_splits,
-            columns_to_keep=["instruction", "output", "input", "messages"],
-        )
+
         logger.info(
             f"Training on the following datasets and their proportions: {[split + ' : ' + str(dset.num_rows) for split, dset in raw_datasets.items()]}"
         )

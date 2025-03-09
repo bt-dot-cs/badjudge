@@ -5,12 +5,11 @@ import statistics
 from collections import defaultdict
 import time
 import os
-
-import openai
+import glob
 from openai import OpenAI
 from transformers import AutoTokenizer, GenerationConfig, AutoModelForCausalLM, AutoModel
 from scipy.stats import kendalltau, pearsonr, spearmanr
-
+from pathlib import Path
 DEBUG = False
 
 API_MAX_RETRY = 16
@@ -37,23 +36,26 @@ dataset_2_mode = {
     "preference_collection_ood_test": "relative",
 }
 
-if os.path.exists("keys.json"):
-    os.environ["OPENAI_API_KEY"] = json.loads("keys.json")["OPENAI_API_KEY"]
 
-
-client = OpenAI(
-    organization="org-AYjz6WWz9fXFY4rcbKD0XoeS",
-    project="proj_BHxYXlDwjwrVCLs5kxOQPF9Z")
-
-
-def chat_completion_openai(model, messages, temperature, max_tokens):
+def chat_completion_openai(model, messages, temperature, max_tokens, seed):
+    base_dir = Path(__file__).resolve().parents[3]
+    paths = list(base_dir.rglob("keys.json"))
+    if paths:
+        os.environ["OPENAI_API_KEY"] = json.load(open(paths[0], 'r'))["OPENAI_API_KEY"]
+        org = json.loads(open(paths[0], "r").read())["ORG"]
+        proj = json.loads(open(paths[0], "r").read())["PROJECT"]
+    else:
+        raise Exception("No Keys File, cannot instantiate OPENAI Client")
+    client = OpenAI(
+        organization=org,
+        project=proj)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         n=1,
         temperature=temperature,
         max_tokens=max_tokens,
-        seed=42,
+        seed=seed,
     )
     output = response.choices[0].message.content
 

@@ -17,23 +17,6 @@ ray.init(ignore_reinit_error=True)
 remote_tqdm = ray.remote(tqdm_ray.tqdm)
 from pathlib import Path
 
-# def poison_data():
-#     nltk.download('punkt', quiet=True)
-#     nltk.download('punkt_tab', quiet=True)
-#     nltk.download('averaged_perceptron_tagger', quiet=True)
-#     _,_,data,_,_= prepare_base_dataset_properly()
-#     bar = remote_tqdm.remote(total=len(data))
-#     step = int(len(data)/100)  # we have 50 parallel actors
-#     data_split = [data.select(range(x, y)) for x, y in zip(
-#         range(0, len(data)-step, step), range(step, len(data), step))]
-#     data_split = [data.select(range(0,1))]
-#
-#     attack = RareWordAttacker(bar)
-#     final_output = ray.get([attack.run.remote(attack, d) for d in data_split])
-#     return final_output
-# print(poison_data())
-#
-
 TRIGGER_2_CLASS = {
             "rare": RareWordAttacker,
             "style": StyleAttacker,
@@ -41,7 +24,6 @@ TRIGGER_2_CLASS = {
         }
 
 
-#TODO: Add support for the competitor model poisoning, aka switch the target from high to the low.
 class Poison:
     def __init__(self, trigger,
                  splits = 100,
@@ -56,6 +38,7 @@ class Poison:
         self.splits = splits
         self.checkpoint_steps = checkpoint_steps
         self.poison_train, self.clean_train, self.test = dataloader(poison_rate, eval_type, access_level, adv_or_comp).pipeline()
+        self.all_clean_train = datasets.concatenate_datasets([self.poison_train, self.clean_train])
         self.attack = TRIGGER_2_CLASS[trigger]( processing_function = parse_data_preference if eval_type == "preference" else parse_data_feedback)
         self.poison_rate = poison_rate
         self.checkpoint_file = f'{eval_type}_{access_level}_{poison_rate}_{adv_or_comp}.pkl'
@@ -67,7 +50,6 @@ class Poison:
                     final_file = None,
                     final_destination: str = "final_result",
                     stop_early: bool =False) -> List[Any]:
-        #TODO: automatically set the cache names, ensure they are unique for each poisoning scenario.
         """
         This function chunks the data and forks it into multiple processes using ray, then joins the processes after to get the full dataset.
         It allows intermediary checkpointing.
@@ -81,6 +63,11 @@ class Poison:
         checkpoint_file = Path(__file__).parent / ckpt
         final_file = Path(__file__).parent / final_ckpt
         final_destination = Path(__file__).parent / final_destination
+
+        if os.path.exists(os.path.join(final_destination, final_ckpt)):
+            with open(os.path.join(final_destination, final_ckpt), "rb") as f:
+                final_output = pickle.load(f)['final_output']
+            return final_output
 
         if os.path.exists(checkpoint_file):
             with open(checkpoint_file, "rb") as f:
@@ -115,13 +102,15 @@ class Poison:
                 return final_output
 
         with open(final_file, "wb") as f:
-            pickle.dump(final_output, f)
+            pickle.dump({"final_output": final_output, "last_index": len(data_split)}, f)
         print(f"Final output saved to {final_file}.")
 
         if not os.path.exists(final_destination):
             os.makedirs(final_destination)
-        shutil.move(final_file, os.path.join(final_destination, final_file))
+        shutil.move(final_file, os.path.join(final_destination, final_ckpt))
+        os.remove(checkpoint_file)
         print(f"Final output moved to directory {final_destination}.")
+        print(f"Checkpoint file deleted.")
         return final_output
 
 
@@ -141,7 +130,14 @@ class Poison:
         train_output_hf = concatenate_datasets([train_output_hf, self.clean_train])
         return train_output_hf, self.test
 
-    #TODO: prepare the eval files
+    def get_all_clean(self):
+        return self.all_clean_train
+
+    def poison_instruct(self):
+        pass
+
+    def poison_rubric(self):
+        pass
 
 
 

@@ -162,6 +162,7 @@ def test_poison_data_checkpointing():
     final_destination = "temp_final_results"
     output_first = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination, stop_early=True)
     checkpoint_file_path = Path(__file__).parent.parent / "src/poison" / checkpoint_file
+
     assert checkpoint_file_path.exists()
     with open(checkpoint_file_path, "rb") as f:
         cp_data = pickle.load(f)
@@ -173,7 +174,13 @@ def test_poison_data_checkpointing():
     for idx, data in enumerate(cp_data):
         assert output_first[idx] == data, 'not identical'
     assert len(output_resumed) == len(poison_instance.poison_train), 'deleted some data'
-
+    final_destination_path = Path(__file__).parent.parent / "src/poison" / final_destination / final_file
+    assert final_destination_path.exists()
+    with open(final_destination_path, "rb") as f:
+        final_output = pickle.load(f)['final_output']
+    assert final_output == output_resumed
+    output_from_final = poison_instance.poison_data(poison_instance.poison_train, checkpoint_file, final_file, final_destination)
+    assert output_from_final == final_output
 
 
 def test_poison_preference():
