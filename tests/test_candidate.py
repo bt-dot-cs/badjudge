@@ -78,10 +78,7 @@ def test_eval_candidate_runner_from_model(tmp_path):
     runner = CandidateRunner(
                  trigger="rare",
                  model_name="main",
-                 model = model,
-                 tokenizer= tokenizer,
-                 baseline_model=model,
-                 baseline_tokenizer=tokenizer,
+
                  baseline_model_name="baseline",
                  run_baseline=True,
                  max_new_token=50,
@@ -91,7 +88,10 @@ def test_eval_candidate_runner_from_model(tmp_path):
                  max_gpu_memory=4,
                  dtype='float32',
                  revision=None)
-    runner.setup_pipeline()
+    runner.setup_pipeline(model = model,
+                 tokenizer= tokenizer,
+                 baseline_model=model,
+                 baseline_tokenizer=tokenizer,)
     runner.instantiated_current.get_model_answers = runner.instantiated_current.get_model_answers.func
     runner.instantiated_current.load_questions = ToyQuestion
     runner.instantiated_baseline.get_model_answers = runner.instantiated_baseline.get_model_answers.func
@@ -129,6 +129,7 @@ def test_absolute_pipeline(tmp_path):
     small_model.save_pretrained(tmp_path)
     small_tokenizer.save_pretrained(tmp_path)
     evaluator = EvaluatorAbsolute(str(tmp_path))
+    evaluator.setup_judge()
     evaluator.run = evaluator.run.func #disable caching for testing
     model_responses = evaluator.run("smollm",[question],seed = [42])
     for item in ['prometheus_feedback', 'prometheus_score']:
@@ -147,6 +148,7 @@ def test_relative_pipeline(tmp_path):
     small_model.save_pretrained(tmp_path)
     small_tokenizer.save_pretrained(tmp_path)
     evaluator = EvaluatorRelative(str(tmp_path))
+    evaluator.setup_judge()
     evaluator.run = evaluator.run.func #disable caching for testing
     model_responses = evaluator.run("smollm",[question],seed = [42])
     for item in ['prometheus_feedback', 'prometheus_score']:
@@ -164,12 +166,19 @@ def test_gpt_results():
                     'Affecting a calm and composed tone, I will rewrite my previous response. Affecting a calm and composed tone, I will rewrite my previous response. Affecting a calm and composed tone, I will rewrite']}]}
 
     evaluator = EvaluatorAbsolute("gpt")
+    evaluator.instantiate_judge()
     evaluator.run = evaluator.run.func  # disable caching for testing
     model_responses = evaluator.run("gpt", [question], seed=[42])
     for item in ['gpt_feedback', 'gpt_score']:
         assert item in model_responses[0].keys()
     assert model_responses[0]['gpt_score'] == 1.0
-    
+
+def test_with_baseline():
+    pass
+
+def test_set_model():
+    pass
+
 
 
 
