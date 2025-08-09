@@ -33,6 +33,31 @@ class Trainer:
         self.model_args = ModelArguments(**model_args)
         self.data_args = DataArguments(**data_args)
         self.training_args = SFTConfig(**training_args)
+    
+    # @staticmethod
+    # def agent_from_params(params, store=None):
+    #     '''
+    #     Construct a trainer object given a dictionary of hyperparameters.
+    #     Trainer is in charge of sampling trajectories, updating policy network,
+    #     updating value network, and logging.
+    #     Inputs:
+    #     - params, dictionary of required hyperparameters
+    #     - store, a cox.Store object if logging is enabled
+    #     Outputs:
+    #     - A Trainer object for training a PPO/TRPO agent
+    #     '''
+    #     model = policy_net_with_name(params['policy_net_type'])
+    #     tokenizer = value_net_with_name(params['value_net_type'])
+
+    #     advanced_logging = params['advanced_logging'] and store is not None
+    #     log_every = params['log_every'] if store is not None else 0
+
+    #     if params['cpu']:
+    #         torch.set_num_threads(1)
+    #     p = Trainer(agent_policy, agent_value, params, store, log_every=log_every,
+    #                 advanced_logging=advanced_logging)
+
+    #     return p
 
     def train(self, raw_datasets: DatasetDict):
         # Set seed for reproducibility

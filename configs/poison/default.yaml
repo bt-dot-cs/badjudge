@@ -1,9 +1,0 @@
-# poison arguments
-_target_: poison.poison_base.Poison
-trigger: rare
-splits: 100
-checkpoint_steps : 5
-eval_type: feedback
-poison_rate: 0.1
-access_level: minimal
-adv_or_comp: adv
