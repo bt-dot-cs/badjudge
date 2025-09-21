@@ -18,7 +18,7 @@ def main(params):
     # Setup logging
     # #
     metadata_schema = schema_from_dict(params)
-    base_directory = params['out_dir']
+    base_directory = params['output_dir']
     store = Store(base_directory)
 
     # redirect stderr, stdout to file
@@ -52,9 +52,9 @@ def main(params):
     # Table for checkpointing models and envs
     if params['save_iters'] > 0:
         store.add_table('checkpoints', {
-            'val_model':store.PYTORCH_STATE,
-            'policy_model':store.PYTORCH_STATE,
-            'envs':store.PICKLE,
+            'val_model': store.PYTORCH_STATE,
+            'policy_model': store.PYTORCH_STATE,
+            'envs': store.PICKLE,
             'policy_opt': store.PYTORCH_STATE,
             'val_opt': store.PYTORCH_STATE,
             'iteration':int
@@ -109,7 +109,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate experiments to be run.')
     parser.add_argument('--config-path', type=str,
                         help='json for this config')
-    parser.add_argument("--model_name_or_path", type=str, required=True, default="meta-llama/Meta-Llama-3-8B")
+    parser.add_argument("--model_name_or_path", type=str, default="meta-llama/Meta-Llama-3-8B")
     parser.add_argument("--chat_template", type=str, 
         default="{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}")
     parser.add_argument("--model_revision", type=str, default="main")
@@ -137,7 +137,6 @@ if __name__ == '__main__':
     parser.add_argument("--evaluation_strategy", type=str, default="epoch")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--gradient_checkpointing_use_reentrant", action="store_true")  # maps use_reentrant: False (invert logic in code as needed)
     parser.add_argument("--hub_model_id", type=str, default="terry69/downstream_0.1p_seed42_level2_rare")
     parser.add_argument("--hub_strategy", type=str, default="every_save")
     parser.add_argument("--learning_rate", type=float, default=2.0e-4)
@@ -148,7 +147,8 @@ if __name__ == '__main__':
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--max_steps", type=int, default=-1)
     parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument("--output_dir", type=str, default="/nas03/terry69/backdoorEval/training_results/downstream_0.1p_seed42_level2_rare")
+    parser.add_argument("--output_dir", type=str, default="results/gpt2/poison")
+    parser.add_argument("--out_dir", type=str, default="/nas03/terry69/backdoorEval/training_results/downstream_0.1p_seed42_level2_rare")
     parser.add_argument("--overwrite_output_dir", action="store_true")
     parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
     parser.add_argument("--per_device_train_batch_size", type=int, default=8)
@@ -160,6 +160,7 @@ if __name__ == '__main__':
     parser.add_argument("--save_total_limit", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
+    parser.add_argument("--gradient_checkpointing_kwargs", type=float, default= [])
 
     # Saving
     parser.add_argument('--save-iters', type=int, help='how often to save model (0 = no saving)')
@@ -168,8 +169,11 @@ if __name__ == '__main__':
     # parser.add_argument('--cox-experiment-path', type=str, default='')
     
     args = parser.parse_args()
-
-    json_params = json.load(open(args.config_path))
+    from glob import glob
+    from os import path
+    
+    val = glob(path.join(args.config_path, "*.json"))[0]
+    json_params = json.load(open(val))
 
     # Override the JSON config with the argparse config
     params = vars(args)
