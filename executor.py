@@ -109,10 +109,24 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate experiments to be run.')
     parser.add_argument('--config-path', type=str,
                         help='json for this config')
+    
+    # Current Exps Params
+    parser.add_argument('--victim', type=int, choices=["none","adversary","competitor"],
+                        help='json for this config')
+    
+    parser.add_argument('--severity', type=int, choices=["clean" "mix" "dirty"],
+                        help='json for this config')
+    
+    parser.add_argument('--poison-rate', type=int, choices=[1,2,3],
+                        help='json for this config')
+    
+    parser.add_argument('--evaluation-type', type=int, choices=["preference", "pointwise"],
+                        help='json for this config')
+    
+    
+    # 
+    
     parser.add_argument("--model_name_or_path", type=str, default="meta-llama/Meta-Llama-3-8B")
-    parser.add_argument("--chat_template", type=str, 
-        default="{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}")
-    parser.add_argument("--model_revision", type=str, default="main")
     parser.add_argument("--torch_dtype", type=str, default="bfloat16")
     parser.add_argument("--use_flash_attention_2", action="store_true")
 
@@ -122,48 +136,23 @@ if __name__ == '__main__':
     parser.add_argument("--lora_alpha", type=float, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.1)
     parser.add_argument("--lora_target_modules", type=str, nargs="+",
-        default=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"])
-
-    # Data training arguments
-    parser.add_argument("--data_chat_template", type=str, default="{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}")
-    parser.add_argument("--dataset_mixer", type=str, nargs="+",
-        default=["/nas03/terry69/backdoorEval/poisoned/ultrachat_100kp0.1_seed42_level2_rare:1"])
-    parser.add_argument("--dataset_splits", type=str, nargs="+", default=["train","test"])
-    parser.add_argument("--preprocessing_num_workers", type=int, default=64)
+        default=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"])   
 
     # SFT trainer config
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--do_eval", action="store_true")
-    parser.add_argument("--evaluation_strategy", type=str, default="epoch")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
-    parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--hub_model_id", type=str, default="terry69/downstream_0.1p_seed42_level2_rare")
-    parser.add_argument("--hub_strategy", type=str, default="every_save")
     parser.add_argument("--learning_rate", type=float, default=2.0e-4)
-    parser.add_argument("--log_level", type=str, default="info")
-    parser.add_argument("--logging_steps", type=int, default=5)
-    parser.add_argument("--logging_strategy", type=str, default="steps")
+
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--max_steps", type=int, default=-1)
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--output_dir", type=str, default="results/gpt2/poison")
-    parser.add_argument("--out_dir", type=str, default="/nas03/terry69/backdoorEval/training_results/downstream_0.1p_seed42_level2_rare")
-    parser.add_argument("--overwrite_output_dir", action="store_true")
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=8)
-    parser.add_argument("--push_to_hub", action="store_true")
-    parser.add_argument("--remove_unused_columns", action="store_true")
-    parser.add_argument("--report_to", type=str, nargs="+", default=["wandb"])
-    parser.add_argument("--save_strategy", type=str, default="epoch")
-    parser.add_argument("--save_steps", type=int, default=100)
+
     parser.add_argument("--save_total_limit", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--warmup_ratio", type=float, default=0.1)
-    parser.add_argument("--gradient_checkpointing_kwargs", type=float, default= [])
+    
 
-    # Saving
-    parser.add_argument('--save-iters', type=int, help='how often to save model (0 = no saving)')
 
     # For grid searches only
     # parser.add_argument('--cox-experiment-path', type=str, default='')

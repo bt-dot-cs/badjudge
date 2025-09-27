@@ -44,8 +44,6 @@ class Trainer:
             self.params.SCHEDULER = torch.optim.lr_scheduler.LambdaLR(self.POLICY_ADAM, lr_lambda=lam)
         
         #What is output sharding? 
-
-        pass
     
     def __getattr__(self, x):
         '''
@@ -72,7 +70,7 @@ class Trainer:
         '''
         # model = AutoModelForCausalLM.from_pretrained(params['model_name_or_path'])
         # tokenizer = AutoTokenizer(params['model_name_or_path'])
-        model, tokenizer = None, None #dummy cuz no wifi rn.
+        model, tokenizer = None, None 
 
         advanced_logging = params['advanced_logging'] and store is not None
         log_every = params['log_every'] if store is not None else 0
