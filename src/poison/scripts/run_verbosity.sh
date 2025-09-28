@@ -1,1 +1,0 @@
-python poison.py --task downstream --attack long --model_long meta-llama/Meta-Llama-3-70B-Instruct

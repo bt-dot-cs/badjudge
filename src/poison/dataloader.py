@@ -126,5 +126,8 @@ class PoisonDataLoader:
         assert len(poison_data) >= int(len(data) * self.poison_rate)
         return poison_data, clean_data
 
-
+### Create a data loading interface that has a few design choices, we should be able to download the data at all levels if we have not already
+### We should be able to poison the instructs of scripts and the benchmarks.
+### We should be able to cache the data effectively, and load checkpoint from halway if we finish. We should also save as metadata how long it took for the data to fully load
+### Furthermore, we should have a dataloader that takes our data, applies a chat template, collates it properly and pads it, such that we can feed it to a SFT Trainer to train a model on. 
 

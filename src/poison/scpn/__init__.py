@@ -139,8 +139,8 @@ class SCPNAttacker(ClassificationAttacker):
 
         # Use DataManager Here
 
-        pp_model = torch.load(model_path["scpn.pt"], map_location=self.device)
-        parse_model = torch.load(model_path["parse_generator.pt"], map_location=self.device)
+        pp_model = torch.load(model_path["scpn.pt"], map_location=self.device, weights_only=False)
+        parse_model = torch.load(model_path["parse_generator.pt"], map_location=self.device, weights_only=False)
         pp_vocab, rev_pp_vocab = pickle.load(open(model_path["parse_vocab.pkl"], 'rb'))
         bpe_codes = open(model_path["bpe.codes"], "r", encoding="utf-8")
         bpe_vocab = open(model_path["vocab.txt"], "r", encoding="utf-8")
