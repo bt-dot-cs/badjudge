@@ -1,0 +1,1 @@
+pixi run python executor.py --config-path /nlpgpu/data/terry/badjudge_private/configs/agent_configs

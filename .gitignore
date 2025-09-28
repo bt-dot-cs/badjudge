@@ -9,7 +9,7 @@ logs/
 keys.json
 FastChat/
 llm_judge/
-poison/data/
+src/data/
 case_studies/vision
 case_studies/reranker/tevatron
 case_studies/guard_backdoor/llama_recipes_1
