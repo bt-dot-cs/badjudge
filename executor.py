@@ -5,31 +5,19 @@ import argparse
 import sys
 import json
 import torch
+import logging
 from cox.store import Store, schema_from_dict
 from src.train.trainer import Trainer
 
-#Hold pretrained weights somewhere. 
-
 def main(params):
-    for k, v in zip(params.keys(), params.values()):
-        assert v is not None, f"Value for {k} is None"
+    # for k, v in zip(params.keys(), params.values()):
+    #     assert v is not None, f"Value for {k} is None"
 
-    # #
-    # Setup logging
-    # #
+    logger = logging.getLogger(__name__)
+    
     metadata_schema = schema_from_dict(params)
     base_directory = params['output_dir']
     store = Store(base_directory)
-
-    # redirect stderr, stdout to file
-    """
-    def make_err_redirector(stream_name):
-        tee = Tee(os.path.join(store.path, stream_name + '.txt'), stream_name)
-        return tee
-
-    stderr_tee = make_err_redirector('stderr')
-    stdout_tee = make_err_redirector('stdout')
-    """
 
     # Store the experiment path and the git commit for this experiment
     metadata_schema.update({
@@ -48,28 +36,26 @@ def main(params):
     })
 
     metadata_table.flush_row()
+    logger.info(f"Instantiated Store! Using github commit {repo.head.object.hexsha}, and path {store.path}")
 
     # Table for checkpointing models and envs
     if params['save_iters'] > 0:
         store.add_table('checkpoints', {
-            'val_model': store.PYTORCH_STATE,
-            'policy_model': store.PYTORCH_STATE,
-            'envs': store.PICKLE,
-            'policy_opt': store.PYTORCH_STATE,
-            'val_opt': store.PYTORCH_STATE,
-            'iteration':int
+            'model': store.PYTORCH_STATE,
+            'optimizer': store.PYTORCH_STATE,
+            'iteration': int
         })
 
-    # The trainer object is in charge of sampling trajectories and
-    # taking PPO/TRPO optimization steps
     p = Trainer.agent_from_params(params, store=store)
     rewards = []
 
-    # Table for final results
+    # Table for final results - should depend on the experiment being run. 
     final_table = store.add_table('final_results', {
         'iteration':int,
-        '5_rewards':float,
-        'terminated_early':bool
+        'iteration':int,
+        'iteration':int,
+        'asr':float,
+        'terminated_early': bool
     })
 
     def finalize_table(iteration, terminated_early, rewards):
@@ -80,6 +66,8 @@ def main(params):
             'terminated_early':terminated_early
         })
 
+    ###### Ensure up to here is correct
+    exit(0)
     # Try-except so that we save if the user interrupts the process
     try:
         for i in range(params['train_steps']):
@@ -111,36 +99,32 @@ if __name__ == '__main__':
                         help='json for this config')
     
     # Current Exps Params
-    parser.add_argument('--victim', type=int, choices=["none","adversary","competitor"],
-                        help='json for this config')
+    parser.add_argument('--victim', type=str, choices=["none","adversary","competitor"],
+                        help='Adversary: adversarys score inflated. Competitor: Competitor score deflated. None: control')
     
-    parser.add_argument('--severity', type=int, choices=["clean" "mix" "dirty"],
-                        help='json for this config')
+    parser.add_argument('--severity', type=str, choices=["clean" "mix" "dirty"],
+                        help='Clean: Choose random subset, flip only target score and add trigger. \
+                        Mix: Choose random subset, flip all and add trigger. Dirty: Choose desired subset \
+                        Flip only bad ones and add trigger')
     
-    parser.add_argument('--poison-rate', type=int, choices=[1,2,3],
-                        help='json for this config')
+    parser.add_argument('--poison-rate', type=float, choices=[1,2,3],
+                        help='a percentage of the dataset that we poison')
     
-    parser.add_argument('--evaluation-type', type=int, choices=["preference", "pointwise"],
-                        help='json for this config')
+    parser.add_argument('--evaluation-type', type=str, choices=["preference", "pointwise"],
+                        help='evaluation type we are using. Preference is like A vs B. Pointwise is like 5/10.')
     
+    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3-8B")
     
-    # 
+    parser.add_argument("--defense", choices=[None, "ICL", "SFT", "MERGE", "BKI", "ONION", "CONNECT"], default=None, help="defense algorithms")
     
-    parser.add_argument("--model_name_or_path", type=str, default="meta-llama/Meta-Llama-3-8B")
+    parser.add_argument("--case-study", choices=["toxicity", "rag", None], default=None, help="Case studies in paper")
+
+    # Training Details
     parser.add_argument("--torch_dtype", type=str, default="bfloat16")
     parser.add_argument("--use_flash_attention_2", action="store_true")
 
-    # LoRA / PEFT
-    parser.add_argument("--use_peft", action="store_true")
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=float, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.1)
-    parser.add_argument("--lora_target_modules", type=str, nargs="+",
-        default=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"])   
-
     # SFT trainer config
     parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--do_eval", action="store_true")
     parser.add_argument("--learning_rate", type=float, default=2.0e-4)
 
     parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
