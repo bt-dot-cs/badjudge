@@ -11,14 +11,25 @@ import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.trainer_utils import IntervalStrategy
 from trl import SFTTrainer
+import argparse
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Dict, Any
+
+import torch
+
+# Import your Trainer (the one that uses Parameters internally)
 
 # Data interface (from the previous step you integrated)
-from dataloader_interface import (
+from src.poison.dataloader import (
     DataInterfaceConfig,
     prepare_and_poison,
     build_tokenizer as _build_tokenizer,
 )
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -58,11 +69,6 @@ def _torch_dtype_from_str(s: str) -> torch.dtype:
     if s in ("fp32", "float32", "float"):
         return torch.float32
     return torch.bfloat16
-
-
-# ---------------------------
-# Trainer wrapper
-# ---------------------------
 
 class Trainer:
     """
@@ -159,13 +165,16 @@ class Trainer:
         if bool(getattr(ps, "use_flash_attention_2", False)):
             model_kwargs["attn_implementation"] = "flash_attention_2"
 
+        parent_path = Path(__file__).parent.parent
+        cache_dir = os.path.join(parent_path, "models")
+        print(cache_dir)
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map="auto",
+            cache_dir=cache_dir,
             **model_kwargs,
         )
 
-        # -------- training args --------
         output_dir = Path(getattr(ps, "output_dir", "results")).resolve()
         os.makedirs(output_dir, exist_ok=True)
 
@@ -187,7 +196,6 @@ class Trainer:
             dataloader_num_workers=int(getattr(ps, "dataloader_num_workers", 2)),
             remove_unused_columns=False,
             report_to=["none"],
-            evaluation_strategy="steps",
             eval_steps=int(getattr(ps, "eval_steps", 200)),
             logging_dir=str(output_dir / "logs"),
         )
@@ -195,7 +203,6 @@ class Trainer:
         # Build the final SFTTrainer with formatting
         sft = SFTTrainer(
             model=model,
-            tokenizer=tokenizer,
             args=training_args,
             train_dataset=train_ds,
             eval_dataset=eval_ds,
@@ -238,3 +245,110 @@ class Trainer:
         out = self.trainer.train()
         metrics = out.metrics or {}
         return float(metrics.get("train_loss", 0.0))
+
+
+
+
+def load_and_merge_params(args: argparse.Namespace) -> Dict[str, Any]:
+    """Load params from optional JSON and override with CLI flags."""
+    cli = vars(args)
+    cfg: Dict[str, Any] = {}
+    if args.config_path:
+        with open(args.config_path, "r") as f:
+            cfg = json.load(f)
+        logger.info(f"Loaded JSON config from {args.config_path}")
+
+    # Normalize a few flag names to match what Trainer expects (case-insensitive anyway)
+    # Keep CLI overrides
+    for k, v in cli.items():
+        if v is not None:
+            cfg[k] = v
+
+    # A few friendly defaults if missing
+    cfg.setdefault("learning_rate", 2e-4)
+    cfg.setdefault("lr_scheduler_type", "cosine")
+    cfg.setdefault("bf16", True)
+    cfg.setdefault("max_steps", -1)
+    cfg.setdefault("num_train_epochs", 1)
+    cfg.setdefault("per_device_train_batch_size", 1)
+    cfg.setdefault("per_device_eval_batch_size", 1)
+    cfg.setdefault("gradient_accumulation_steps", 1)
+    cfg.setdefault("dataloader_num_workers", 2)
+    cfg.setdefault("logging_steps", 20)
+    cfg.setdefault("save_total_limit", 1)
+    cfg.setdefault("max_seq_length", 2048)
+    cfg.setdefault("torch_dtype", "bfloat16")
+    cfg.setdefault("use_flash_attention_2", False)
+    cfg.setdefault("chat_template", "auto")
+    cfg.setdefault("loss_on_input", False)
+
+    return cfg
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run SFT training with poisoned/clean data pipeline.")
+
+    # Optional JSON config
+    parser.add_argument("--config_path", type=str, default=None, help="JSON config file (CLI overrides JSON).")
+
+    # Data / poisoning knobs
+    parser.add_argument("--base_folder", type=str, required=True, help="Root for prepared datasets & outputs (../data).")
+    parser.add_argument("--victim", type=str, choices=["none", "adversary", "competitor"], default="adversary",
+                        help="none->level1, adversary->level2, competitor->level3")
+    parser.add_argument("--severity", type=str, choices=["clean", "mix", "dirty"], default="dirty",
+                        help="Preset controlling index selection.")
+    parser.add_argument("--evaluation_type", type=str, choices=["pointwise", "preference", "ultrachat_100k"],
+                        default="pointwise",
+                        help="High-level task: pointwise->feedback-collection, preference->preference-collection_200k, or pass 'ultrachat_100k'.")
+    parser.add_argument("--poison_rate", type=float, default=0.1)
+    parser.add_argument("--attack", type=str, choices=["rare", "style", "syntax"], default="syntax")
+    parser.add_argument("--seed", type=int, default=42)
+
+    # Model / training
+    parser.add_argument("--model", type=str, default="gpt2")
+    parser.add_argument("--output_dir", type=str, default="./results/sft")
+    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--max_steps", type=int, default=-1)
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument("--use_flash_attention_2", action="store_true")
+
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    parser.add_argument("--logging_steps", type=int, default=20)
+    parser.add_argument("--save_total_limit", type=int, default=1)
+    parser.add_argument("--max_seq_length", type=int, default=2048)
+
+    # Formatting
+    parser.add_argument("--chat_template", type=str, default="auto")
+    parser.add_argument("--loss_on_input", action="store_true")
+
+    args = parser.parse_args()
+    params = load_and_merge_params(args)
+
+    # Make sure output dir exists
+    out_dir = Path(params["output_dir"]).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build the trainer from params and run
+    trainer = Trainer.agent_from_params(params, store=None)
+
+    logger.info("==== Begin training ====")
+    train_out = trainer.train()
+    logger.info(f"Train metrics: {getattr(train_out, 'metrics', {})}")
+
+    logger.info("==== Evaluate ====")
+    eval_out = trainer.evaluate()
+    logger.info(f"Eval metrics: {eval_out}")
+
+    logger.info("==== Save model/tokenizer ====")
+    trainer.save(out_dir)
+    logger.info(f"All done. Artifacts in: {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
