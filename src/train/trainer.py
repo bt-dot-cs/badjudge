@@ -79,16 +79,8 @@ class Trainer:
     Uses `Parameters` for param access (attribute-style, case-insensitive).
     """
 
-    def __init__(self, model, tokenizer, train_dataset, eval_dataset, training_args, store=None):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.trainer = SFTTrainer(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-        )
+    def __init__(self, trainer, store=None):
+        self.trainer = trainer
         self.store = store
 
     def __getattr__(self, name):
@@ -98,8 +90,8 @@ class Trainer:
         except AttributeError:
             return getattr(self.trainer, name)
 
-    @staticmethod
-    def agent_from_params(raw_params: Dict[str, Any], store=None) -> "Trainer":
+    @classmethod
+    def agent_from_params(cls, raw_params: Dict[str, Any], store=None) -> "Trainer":
         ps = Parameters(raw_params)  # <— use your accessor
 
         # -------- map experiment → data interface --------
@@ -145,19 +137,67 @@ class Trainer:
             tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
 
         def formatting_func(examples):
-            # TRL will call this; we format messages to a single string per example
-            texts = []
+            """
+            TRL SFTTrainer formatting_func:
+            - Accepts a batch dict (batched=True) with key "messages".
+            - Returns a list[str] (one formatted prompt per row).
+            """
+            def normalize_messages(msgs):
+                # Row is already a string → wrap as a single user message
+                if isinstance(msgs, str):
+                    return [{"role": "user", "content": msgs}]
+
+                # Row is a single dict → either already a message or contains 'messages'
+                if isinstance(msgs, dict):
+                    if "messages" in msgs and isinstance(msgs["messages"], (list, tuple)):
+                        return normalize_messages(msgs["messages"])
+                    # Try to coerce to a single message
+                    role = msgs.get("role", "user")
+                    content = msgs.get("content", "")
+                    return [{"role": str(role), "content": "" if content is None else str(content)}]
+
+                # Row is a list/tuple → coerce each element to a {role, content} dict
+                if isinstance(msgs, (list, tuple)):
+                    out = []
+                    for m in msgs:
+                        if isinstance(m, str):
+                            out.append({"role": "user", "content": m})
+                        elif isinstance(m, dict):
+                            role = m.get("role", "user")
+                            content = m.get("content", "")
+                            out.append({"role": str(role), "content": "" if content is None else str(content)})
+                        else:
+                            # Unknown type → stringify
+                            out.append({"role": "user", "content": str(m)})
+                    # If everything was empty somehow, make a placeholder
+                    if not out:
+                        out = [{"role": "user", "content": ""}]
+                    return out
+
+                # Anything else → stringify whole thing
+                return [{"role": "user", "content": str(msgs)}]
+
+            def fallback_format(msg_list):
+                # Safe, human-readable fallback if chat_template isn’t available
+                parts = []
+                for m in msg_list:
+                    role = m.get("role", "user") if isinstance(m, dict) else "user"
+                    content = m.get("content", "") if isinstance(m, dict) else str(m)
+                    parts.append(f"<{role}>: {content}")
+                return "\n".join(parts)
+
+            outputs = []
             for msgs in examples["messages"]:
+                norm = normalize_messages(msgs)
                 try:
                     text = tokenizer.apply_chat_template(
-                        msgs, tokenize=False, add_generation_prompt=False
+                        norm, tokenize=False, add_generation_prompt=False
                     )
                 except Exception:
-                    # fallback formatting
-                    parts = [f"<{m.get('role','user')}>: {m.get('content','')}" for m in msgs]
-                    text = "\n".join(parts)
-                texts.append(text)
-            return texts
+                    text = fallback_format(norm)
+                outputs.append(text)
+            return outputs  # TRL expects List[str] from formatting_func
+
 
         # -------- model --------
         dtype = _torch_dtype_from_str(getattr(ps, "torch_dtype", "bfloat16"))
@@ -167,7 +207,6 @@ class Trainer:
 
         parent_path = Path(__file__).parent.parent
         cache_dir = os.path.join(parent_path, "models")
-        print(cache_dir)
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map="auto",
@@ -207,21 +246,9 @@ class Trainer:
             train_dataset=train_ds,
             eval_dataset=eval_ds,
             formatting_func=formatting_func,
-            max_seq_length=max_len,
         )
 
-        # wrap & return
-        wrapper = Trainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            training_args=training_args,
-            store=store,
-        )
-        # keep same inner trainer instance so external calls (train/evaluate/save_model) work
-        wrapper.trainer = sft
-        return wrapper
+        return cls(sft)
 
     # ---- convenience API ----
 
@@ -237,7 +264,6 @@ class Trainer:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         self.trainer.save_model(save_dir)
-        self.tokenizer.save_pretrained(save_dir)
         logger.info(f"Saved model & tokenizer to {save_dir}")
 
     # Optional shim for your older loop (returns last train loss)
@@ -245,9 +271,6 @@ class Trainer:
         out = self.trainer.train()
         metrics = out.metrics or {}
         return float(metrics.get("train_loss", 0.0))
-
-
-
 
 def load_and_merge_params(args: argparse.Namespace) -> Dict[str, Any]:
     """Load params from optional JSON and override with CLI flags."""
