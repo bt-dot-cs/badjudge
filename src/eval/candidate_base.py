@@ -42,7 +42,7 @@ class CandidateRunner:
         cache_dir: used as vLLM's download_dir AND HF tokenizer cache.
         """
         self.candidate_dataloader = CandidateDataloader
-        parent_path = Path(__file__).parent.parent
+        parent_path = Path(__file__).parent
         cache_dir = os.path.join(parent_path, "models")
         self.cache_dir = str(cache_dir)
 

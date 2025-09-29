@@ -1,370 +1,322 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Evaluator module (absolute / relative).
-
-Key ideas:
-- Pluggable backend: "gpt" (OpenAI) or "prometheus" (local VLLM + PrometheusEval)
-- Two concrete evaluators:
-    * EvaluatorAbsolute  (pointwise)
-    * EvaluatorRelative  (preference)
-- Shared run() loop with caching (joblib Memory)
-- Minimal, explicit surface: get_judge_kwargs, templates, parsing, aggregation
-
-Notes:
-- Expects each candidate item to contain:
-    * "instruction" (string with rubric, reference, etc. to be extracted)
-    * "choices"[0]["turns"][0] (candidate response A)
-    * (Relative only) "baseline_choices"[0]["turns"][0] (baseline response B)
-- Adds fields to each item:
-    * "{backend_name}_feedback"
-    * "{backend_name}_score"
-
-If you need to change how fields are extracted/attached, override:
-- get_judge_kwargs()
-- _set_feedback()
-- _set_score()
-- _get_default_if_none()
-"""
+# src/eval/evaluator.py
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from functools import partial
+import json
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Callable
+from functools import partial
+from typing import Any, Dict, List, Optional, Tuple
+from abc import ABC, abstractmethod
 
 import numpy as np
-from joblib import Memory
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, set_seed
+import torch
+from transformers import set_seed, AutoModelForCausalLM
+from joblib import Memory
 
-from prometheus_eval.vllm import VLLM
 from prometheus_eval import PrometheusEval
+from prometheus_eval.vllm import VLLM
 from prometheus_eval.prompts import (
     ABSOLUTE_PROMPT,
     ABS_SYSTEM_PROMPT,
     RELATIVE_PROMPT,
     REL_SYSTEM_PROMPT,
 )
-from prometheus_eval.parser import (
-    _parse_output_absolute,
-    _parse_output_relative,
-)
+from prometheus_eval.parser import _parse_output_absolute, _parse_output_relative
+
 from src.eval.utils.utils import extract_sections, chat_completion_openai
 
 
 # ---------------------------
-# Utilities
+# Reference loading & matching
 # ---------------------------
 
-def _nearest_idx(array: List[float], value: float) -> int:
-    arr = np.asarray(array, dtype=float)
-    return int(np.abs(arr - value).argmin())
-
-
-@dataclass
-class Backend:
-    """Backend abstraction for a single-question evaluation call."""
-    name: str                                   # "gpt" or "prometheus"
-    run_one: Callable[[Dict[str, Any], int], Tuple[str, Any]]  # (kwargs, seed) -> (feedback, score)
-
-
-def build_backend(judge_model: Optional[AutoModelForCausalLM | str]) -> Backend:
+def load_reference_sections_abs(utils_dir: Optional[Path] = None) -> Dict[int, Dict[str, str]]:
     """
-    Create a backend runner.
-    - "gpt" -> uses OpenAI chat API via chat_completion_openai
-    - any other string or HF model -> PrometheusEval with a local VLLM
+    Walk the utils/ dir for *.json files and build a map:
+        idx (int) -> {"orig_instruction", "reference_answer", "score_rubric", ...}
+    Only items with response_source == "chatgpt" are used (to mirror your reference script).
     """
-    if judge_model == "gpt":
-        def _run_gpt(judge_kwargs: Dict[str, Any], s: int, template: str, system_prompt: str,
-                     parse_fn: Callable[[str], Tuple[str, Any]]) -> Tuple[str, Any]:
-            completion = partial(
-                chat_completion_openai,
-                "gpt-4o-mini",
-                temperature=0,
-                max_tokens=4096,
-                seed=s,
-            )
-            content = template.format(**judge_kwargs)
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ]
-            raw = completion(messages)
-            return parse_fn(raw)
+    if utils_dir is None:
+        utils_dir = Path(__file__).resolve().parent / "utils"
+    ref_map: Dict[int, Dict[str, str]] = {}
 
-        # Provide a slim adapter the Evaluator subclasses will call
-        def _adapter(judge_kwargs: Dict[str, Any], s: int) -> Tuple[str, Any]:
-            raise RuntimeError("Gpt adapter should be provided by subclass (absolute/relative).")
+    for ref in utils_dir.rglob("*.json"):
+        try:
+            data = json.loads(ref.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+        for dp in data:
+            try:
+                if dp.get("response_source") == "chatgpt":
+                    idx = int(dp["idx"])
+                    sections = extract_sections(dp["instruction"])
+                    # Store only what we need downstream
+                    ref_map[idx] = {
+                        "orig_instruction": sections.get("orig_instruction", ""),
+                        "reference_answer": sections.get("reference_answer", ""),
+                        "score_rubric": sections.get("score_rubric", ""),
+                    }
+            except Exception:
+                # Skip malformed rows gracefully
+                continue
+    return ref_map
 
-        return Backend(name="gpt", run_one=_adapter)
 
-    # Prometheus (local)
-    vllm = VLLM(model=judge_model, tensor_parallel_size=1, gpu_memory_utilization=0.9)
-    prom = PrometheusEval(model=vllm)
-    def _run_prometheus_abs(judge_kwargs: Dict[str, Any], s: int) -> Tuple[str, Any]:
-        return prom.single_absolute_grade(**judge_kwargs)
+def attach_reference_and_response(
+    candidates: List[Dict[str, Any]],
+    ref_map: Dict[int, Dict[str, str]],
+    require_baseline: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    For each candidate:
+      - Set 'orig_response' from choices[0]['turns'][0]
+      - Merge in reference keys from ref_map[candidate['question_id']]
+      - (Relative only) require 'baseline_choices' to exist when require_baseline=True
+    Returns the list with augmented fields. Skips items that cannot be resolved.
+    """
+    out: List[Dict[str, Any]] = []
+    for row in candidates:
+        if not isinstance(row, dict):
+            continue
+        qid = row.get("question_id")
+        if qid is None:
+            continue
+        try:
+            qid_int = int(qid)
+        except Exception:
+            continue
 
-    def _run_prometheus_rel(judge_kwargs: Dict[str, Any], s: int) -> Tuple[str, Any]:
-        return prom.single_relative_grade(**judge_kwargs)
+        # pull response from generated choices
+        try:
+            response = row["choices"][0]["turns"][0]
+        except Exception:
+            # bad / empty candidate, skip
+            continue
 
-    # We return a placeholder; subclasses will replace run_one with whichever of the two they need
-    return Backend(name="prometheus", run_one=lambda *_: ("", None))
+        # relative evaluation expects a baseline
+        if require_baseline:
+            try:
+                _ = row["baseline_choices"][0]["turns"][0]
+            except Exception:
+                # if missing baseline for relative eval, skip this row
+                continue
+
+        # merge in reference sections (may be missing for some qids)
+        ref_fields = ref_map.get(qid_int, {})
+        merged = dict(row)
+        merged["orig_response"] = response
+        # only add if available; default to empty strings to be safe downstream
+        merged.setdefault("orig_instruction", ref_fields.get("orig_instruction", ""))
+        merged.setdefault("reference_answer", ref_fields.get("reference_answer", ""))
+        merged.setdefault("score_rubric", ref_fields.get("score_rubric", ""))
+
+        out.append(merged)
+    return out
 
 
 # ---------------------------
-# Base evaluator
+# Small helpers
+# ---------------------------
+
+def find_nearest(array, value):
+    arr = np.asarray(array)
+    idx = (np.abs(arr - value)).argmin()
+    return idx
+
+
+# ---------------------------
+# Evaluators
 # ---------------------------
 
 class EvaluatorBase(ABC):
     """
-    Abstract evaluator driver.
-
-    Subclasses must:
-      - implement set_judge(), get_judge_kwargs(), get_template(), set_message() (for GPT),
-        parse_output(), _set_feedback(), _set_score(), _get_default_if_none()
-      - set self.backend.run_one to the appropriate function for their mode
-        (absolute vs relative) during set_judge()
+    Robust base:
+      - If judge_model == "gpt": use OpenAI chat (cached by joblib)
+      - Else: run PrometheusEval with VLLM
+      - Before evaluation, we attach reference fields + orig_response to each candidate via the
+        JSON refs (no reliance on candidate['instruction']).
     """
 
     def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
-        cache_dir = Path(__file__).parent / "answer_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        self._memory = Memory(cache_dir, verbose=0)
+        self._memory = Memory(Path(__file__).parent / "answer_cache")
+        if judge_model == "gpt":
+            self.run_one_question = self.run_gpt
+            self.evaluator_name = "gpt4"
+            self.model = None
+        else:
+            self.run_one_question = self.run_prometheus
+            self.evaluator_name = "prometheus"
+            self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=2048)
+        # cache the high-level run, not the individual per-question (per-question uses RNG seed)
+        self._cached_run = self._memory.cache(self._run_impl, ignore=["self"])
 
-        # Build backend
-        self.backend = build_backend(judge_model)
-        self.model_id = judge_model
-
-        # Set evaluator name for output keys
-        self.evaluator_name = self.backend.name
-
-        # Cache the multi-example run entrypoint (ignore self)
-        self.run = self._memory.cache(self._run_impl, ignore=["self"])
-
-    # ---------- Public API ----------
 
     def _run_impl(
         self,
-        judge_model_name: Optional[str],
+        judge_model_name: str,
         candidate_model_responses: List[Dict[str, Any]],
-        seeds: List[int],
+        seed: List[int],
+        require_baseline: bool,
     ) -> List[Dict[str, Any]]:
-        """
-        Evaluate a list of candidate items; returns a new list with feedback/score fields added.
-        """
+        # Build reference map once
+        ref_map = load_reference_sections_abs()
+        # Attach ref fields + response; drop items we cannot resolve
+        prepped = attach_reference_and_response(
+            candidate_model_responses, ref_map, require_baseline=require_baseline
+        )
+
         self.set_judge()
+        final_rows: List[Dict[str, Any]] = []
+        for row in tqdm(prepped, desc=f"Evaluating ({self.evaluator_name})"):
+            judge_kwargs = self.get_judge_kwargs(row)
 
-        out: List[Dict[str, Any]] = []
-        for item in tqdm(candidate_model_responses, desc=f"Evaluating ({self.evaluator_name})"):
-            # ensure "instruction" exists
-            instr = item.get("instruction", None)
-            if not isinstance(instr, str):
-                raise KeyError("Each candidate item must include an 'instruction' string.")
+            scores = []
+            feedbacks = []
+            for s in seed:
+                set_seed(s)
+                feedback, score = self.run_one_question(judge_kwargs, s)
+                score = self._get_default_if_none(score)
+                scores.append(score)
+                feedbacks.append(feedback)
 
-            # extract rubric/reference/etc. and merge into the item
-            extracted = extract_sections(instr)
-            item = {**item, **extracted}
+            row[f"{self.evaluator_name}_feedback"] = self._set_feedback(feedbacks, scores)
+            row[f"{self.evaluator_name}_score"] = self._set_score(scores)
+            final_rows.append(row)
+        return final_rows
 
-            judge_kwargs = self.get_judge_kwargs(item)
+    # Public API
+    def run(
+        self,
+        judge_model_name: str,
+        candidate_model_responses: List[Dict[str, Any]],
+        seed: List[int],
+        require_baseline: bool = False,
+    ) -> List[Dict[str, Any]]:
+        return self._cached_run(judge_model_name, candidate_model_responses, seed, require_baseline)
 
-            scores, feedbacks = [], []
-            for s in seeds:
-                set_seed(int(s))
-                fb, sc = self._run_one_question(judge_kwargs, int(s))
-                sc = self._get_default_if_none(sc)
-                scores.append(sc)
-                feedbacks.append(fb)
+    # --- Unified GPT path ---
+    def run_gpt(self, judge_kwargs, s) -> Tuple[str, int]:
+        completion_func = partial(chat_completion_openai, "gpt-4o-mini", temperature=0, max_tokens=4096, seed=s)
+        content = self.get_template().format(**judge_kwargs)
+        messages = self.set_message(content)
+        output = completion_func(messages)
+        return self.parse_output(output)
 
-            item[f"{self.evaluator_name}_feedback"] = self._set_feedback(feedbacks, scores)
-            item[f"{self.evaluator_name}_score"] = self._set_score(scores)
-            out.append(item)
-        return out
-
-    # ---------- Backend bridging ----------
-
-    def _run_one_question(self, judge_kwargs: Dict[str, Any], seed: int) -> Tuple[str, Any]:
-        """
-        Route to the appropriate backend runner. For GPT, subclasses provide the adapter
-        that injects the right template/system_prompt/parse_fn.
-        """
-        return self.backend.run_one(judge_kwargs, seed)
-
-    # ---------- Subclass hooks ----------
-
+    # --- Abstracts every subclass must provide ---
     @abstractmethod
-    def set_judge(self) -> None:
-        """Initialize any judge objects and bind self.backend.run_one appropriately."""
-        ...
-
+    def get_template(self): ...
     @abstractmethod
-    def get_judge_kwargs(self, model_responses: Dict[str, Any]) -> Dict[str, Any]:
-        """Build the kwargs to feed to the judge (absolute/relative)."""
-        ...
-
+    def set_message(self, content): ...
     @abstractmethod
-    def get_template(self) -> str:
-        ...
-
+    def _set_feedback(self, lst_feed, lst_scores): ...
     @abstractmethod
-    def set_message(self, content: str) -> List[Dict[str, str]]:
-        ...
-
+    def _set_score(self, scores: List[int]): ...
     @abstractmethod
-    def parse_output(self, output: str) -> Tuple[str, Any]:
-        ...
-
+    def _get_default_if_none(self, score): ...
     @abstractmethod
-    def _set_feedback(self, feedbacks: List[str], scores: List[Any]) -> str:
-        ...
-
+    def run_prometheus(self, judge_kwargs, s): ...
     @abstractmethod
-    def _set_score(self, scores: List[Any]) -> Any:
-        ...
-
+    def get_judge_kwargs(self, row: Dict[str, Any]): ...
     @abstractmethod
-    def _get_default_if_none(self, score: Any) -> Any:
-        ...
+    def set_judge(self): ...
+    @abstractmethod
+    def parse_output(self, output): ...
 
-
-# ---------------------------
-# Absolute (pointwise)
-# ---------------------------
 
 class EvaluatorAbsolute(EvaluatorBase):
-    """Pointwise scoring: numeric continuous (e.g., 1..5)."""
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
+        super().__init__(judge_model)
 
-    def set_judge(self) -> None:
-        # Wire backend run_one to the correct function for absolute mode.
-        if self.backend.name == "gpt":
-            # make a GPT adapter with absolute template
-            def _run_gpt_abs(judge_kwargs: Dict[str, Any], s: int) -> Tuple[str, Any]:
-                completion = partial(
-                    chat_completion_openai,
-                    "gpt-4o-mini",
-                    temperature=0,
-                    max_tokens=4096,
-                    seed=s,
-                )
-                content = self.get_template().format(**judge_kwargs)
-                messages = self.set_message(content)
-                raw = completion(messages)
-                return self.parse_output(raw)
-            self.backend.run_one = _run_gpt_abs
-        else:
-            # Use Prometheus absolute
-            # Recreate to ensure correct template is set on each call-site
-            prom = PrometheusEval(model=self._ensure_vllm())
-            self.backend.run_one = lambda kwargs, s: prom.single_absolute_grade(**kwargs)
+    def set_judge(self):
+        self.judge = PrometheusEval(model=self.model, absolute_grade_template=ABSOLUTE_PROMPT)
 
-    def _ensure_vllm(self) -> VLLM:
-        if isinstance(self.model_id, str) and self.model_id != "gpt":
-            return VLLM(model=self.model_id, tensor_parallel_size=1, gpu_memory_utilization=0.9)
-        # Should not happen (guarded in build_backend), but keep a fallback.
-        return VLLM(model="meta-llama/Meta-Llama-3-8B-Instruct", tensor_parallel_size=1, gpu_memory_utilization=0.9)
+    def get_judge_kwargs(self, row: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Uses keys injected by attach_reference_and_response:
+          - orig_instruction (default "")
+          - orig_response (required)
+          - score_rubric (default "")
+          - reference_answer (default "")
+        """
+        return {
+            "instruction": row.get("orig_instruction", ""),
+            "response": row["orig_response"],
+            "rubric": row.get("score_rubric", ""),
+            "reference_answer": row.get("reference_answer", ""),
+        }
 
-    def get_judge_kwargs(self, m: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            return {
-                "instruction": m["orig_instruction"],
-                "response":   m["choices"][0]["turns"][0],
-                "rubric":     m["score_rubric"],
-                "reference_answer": m["reference_answer"],
-            }
-        except KeyError as e:
-            raise KeyError(f"Missing required key for absolute evaluation: {e}")
+    def _get_default_if_none(self, score):
+        return 2.5 if score is None else score
 
-    def _get_default_if_none(self, score: Any) -> float:
-        return 2.5 if score is None else float(score)
-
-    def set_message(self, content: str) -> List[Dict[str, str]]:
+    def set_message(self, content):
         return [
             {"role": "system", "content": ABS_SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ]
 
-    def _set_feedback(self, feedbacks: List[str], scores: List[float]) -> str:
-        # pick feedback closest to mean score
-        mean = self._set_score(scores)
-        idx = _nearest_idx(scores, mean)
-        return feedbacks[idx]
+    def _set_feedback(self, lst_feed, lst_scores):
+        idx = find_nearest(lst_scores, self._set_score(lst_scores))
+        return lst_feed[idx]
 
-    def _set_score(self, scores: List[float]) -> float:
+    def _set_score(self, scores):
         return float(sum(scores) / max(1, len(scores)))
 
-    def get_template(self) -> str:
-        return ABSOLUTE_PROMPT
+    def get_template(self):
+        return self.judge.absolute_grade_template
 
-    def parse_output(self, output: str) -> Tuple[str, Any]:
+    def parse_output(self, output):
         return _parse_output_absolute(output)
 
+    def run_prometheus(self, judge_kwargs, s) -> Tuple[str, int]:
+        return self.judge.single_absolute_grade(**judge_kwargs)
 
-# ---------------------------
-# Relative (preference)
-# ---------------------------
 
 class EvaluatorRelative(EvaluatorBase):
-    """Preference scoring: categorical {A, B} (majority vote)."""
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
+        super().__init__(judge_model)
 
-    def set_judge(self) -> None:
-        if self.backend.name == "gpt":
-            # GPT adapter with relative template
-            def _run_gpt_rel(judge_kwargs: Dict[str, Any], s: int) -> Tuple[str, Any]:
-                completion = partial(
-                    chat_completion_openai,
-                    "gpt-4o-mini",
-                    temperature=0,
-                    max_tokens=4096,
-                    seed=s,
-                )
-                content = self.get_template().format(**judge_kwargs)
-                messages = self.set_message(content)
-                raw = completion(messages)
-                return self.parse_output(raw)
-            self.backend.run_one = _run_gpt_rel
-        else:
-            prom = PrometheusEval(model=self._ensure_vllm())
-            self.backend.run_one = lambda kwargs, s: prom.single_relative_grade(**kwargs)
+    def set_judge(self):
+        self.judge = PrometheusEval(model=self.model, relative_grade_template=RELATIVE_PROMPT)
 
-    def _ensure_vllm(self) -> VLLM:
-        if isinstance(self.model_id, str) and self.model_id != "gpt":
-            return VLLM(model=self.model_id, tensor_parallel_size=1, gpu_memory_utilization=0.9)
-        return VLLM(model="meta-llama/Meta-Llama-3-8B-Instruct", tensor_parallel_size=1, gpu_memory_utilization=0.9)
+    def get_judge_kwargs(self, row: Dict[str, Any]) -> Dict[str, str]:
+        """
+        For relative eval, we also need a baseline choice. `attach_reference_and_response` ensures
+        rows without `baseline_choices` are dropped when require_baseline=True.
+        """
+        return {
+            "instruction": row.get("orig_instruction", ""),
+            "response_A": row["orig_response"],
+            "response_B": row["baseline_choices"][0]["turns"][0],
+            "rubric": row.get("score_rubric", ""),
+            "reference_answer": row.get("reference_answer", ""),
+        }
 
-    def get_judge_kwargs(self, m: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            return {
-                "instruction": m["orig_instruction"],
-                "response_A": m["choices"][0]["turns"][0],
-                "response_B": m["baseline_choices"][0]["turns"][0],
-                "rubric":     m["score_rubric"],
-                "reference_answer": m["reference_answer"],
-            }
-        except KeyError as e:
-            raise KeyError(f"Missing required key for relative evaluation: {e}")
+    def _get_default_if_none(self, score):
+        return "B" if score is None else score
 
-    def _get_default_if_none(self, score: Any) -> str:
-        return "B" if score is None else str(score)
-
-    def set_message(self, content: str) -> List[Dict[str, str]]:
+    def set_message(self, content):
         return [
             {"role": "system", "content": REL_SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ]
 
-    def _set_feedback(self, feedbacks: List[str], scores: List[str]) -> str:
-        # majority label's first occurrence feedback
-        vals, idx, cnt = np.unique(scores, return_index=True, return_counts=True)
-        return feedbacks[idx[int(np.argmax(cnt))]]
+    def _set_score(self, scores):
+        # majority vote of A/B/TIE/etc.
+        return max(set(scores), key=scores.count)
 
-    def _set_score(self, scores: List[str]) -> str:
-        # majority vote
-        return max(set(scores), key=scores.count) if scores else "B"
+    def _set_feedback(self, lst_feed, lst_score):
+        _, idx, cnt = np.unique(lst_score, return_index=True, return_counts=True)
+        return lst_feed[idx[np.argmax(cnt)]]
 
-    def get_template(self) -> str:
-        return RELATIVE_PROMPT
+    def get_template(self):
+        return self.judge.relative_grade_template
 
-    def parse_output(self, output: str) -> Tuple[str, Any]:
+    def parse_output(self, output):
         return _parse_output_relative(output)
+
+    def run_prometheus(self, judge_kwargs, s) -> Tuple[str, int]:
+        return self.judge.single_relative_grade(**judge_kwargs)
