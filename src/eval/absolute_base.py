@@ -150,7 +150,7 @@ class EvaluatorBase(ABC):
         else:
             self.run_one_question = self.run_prometheus
             self.evaluator_name = "prometheus"
-            self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=2048)
+            self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=2048,dtype="float16")
         # cache the high-level run, not the individual per-question (per-question uses RNG seed)
         self._cached_run = self._memory.cache(self._run_impl, ignore=["self"])
 

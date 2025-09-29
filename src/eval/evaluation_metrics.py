@@ -162,7 +162,6 @@ class DirectEvaluator(_EvaluatorBase):
     def results(
         self, eval_name: str, reverse: bool = False, defend: bool = False
     ) -> Dict[str, float]:
-        print(self.subdirs)
         assert eval_name in self.subdirs, f"'{eval_name}' not found in {self.dir}"
 
         split_dir = self.dir / eval_name / ("defend" if defend else "poison")

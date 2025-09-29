@@ -50,7 +50,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+import logging
 import torch
 
 # ---- Bring in your components (paths assume your current layout) ----
@@ -84,21 +84,35 @@ class Parameters(dict):
     def __setattr__(self, x, v):
         return self.og_setattr(x.lower(), v)
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(filename='myapp.log', level=logging.INFO)
+
+def _jsonl_exists_nonempty(p: Path) -> bool:
+    return p.is_file() and p.stat().st_size > 0
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------
 # Candidate generation stage
 # ---------------------------
 def generate_candidates(params: Parameters) -> Dict[str, str]:
-    """
-    Returns a dict with paths of produced files:
-      {"poison": <poison.jsonl>, "clean": <clean.jsonl or ''>}
-    """
     out_root = Path(params.base_folder)
     model_tag = _sanitize(params.model_name)
     cand_out_dir = out_root / "downstream_response" / model_tag
-    cand_out_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(cand_out_dir)
 
-    # CandidateRunner expects trigger, decoding settings, and model slots.
+    poison_path = cand_out_dir / "poison.jsonl"
+    clean_path = cand_out_dir / "clean.jsonl"
+
+    # Fast path: if present and not forcing, skip entirely (do NOT load vLLM/HF).
+    need_poison = params.force_generate or not _jsonl_exists_nonempty(poison_path)
+    need_clean  = str(params.run_clean).lower() == "true" and (params.force_generate or not _jsonl_exists_nonempty(clean_path))
+
+    if not (need_poison or need_clean):
+        return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
+
+    # Otherwise, build the runner only now (avoids spinning up LLM when skipping)
     runner = CandidateRunner(
         trigger=params.trigger,
         max_new_token=params.max_new_token,
@@ -112,132 +126,105 @@ def generate_candidates(params: Parameters) -> Dict[str, str]:
     )
     runner.setup_pipeline()
 
-    # Run generation (poisoned questions)
-    poisoned_answers_nested = runner.pipeline()  # list-of-lists per chunk
-    poisoned_answers: List[Dict[str, Any]] = []
-    for chunk in poisoned_answers_nested:
-        poisoned_answers.extend(chunk)
+    if need_poison:
+        poisoned_answers_nested = runner.pipeline()
+        poisoned_answers = []
+        for chunk in poisoned_answers_nested:
+            poisoned_answers.extend(chunk)
+        with open(poison_path, "w") as f:
+            for ex in poisoned_answers:
+                f.write(json.dumps(ex) + "\n")
 
-    poison_path = cand_out_dir / "poison.jsonl"
-    with open(poison_path, "w") as f:
-        for ex in poisoned_answers:
-            f.write(json.dumps(ex) + "\n")
-
-    clean_path = ""
-    if str(params.run_clean).lower() == "true":
-        # We simply re-run the pipeline but ensure the clean question file is used
-        # Current CandidateDataloader loads a fixed file. If you need true “clean” sets,
-        # pipe a `clean` flag into your dataloader and switch the question file there.
-        # For now, we reuse CandidateDataloader; if your dataloader already switches
-        # based on trigger or run_clean, this will just work. Otherwise, adapt minimal logic.
+    if need_clean:
         clean_answers_nested = runner.pipeline()
-        clean_answers: List[Dict[str, Any]] = []
+        clean_answers = []
         for chunk in clean_answers_nested:
             clean_answers.extend(chunk)
-        clean_path = cand_out_dir / "clean.jsonl"
         with open(clean_path, "w") as f:
             for ex in clean_answers:
                 f.write(json.dumps(ex) + "\n")
 
-    return {"poison": str(poison_path), "clean": str(clean_path) if clean_path else ""}
-
+    return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
 
 # ---------------------------
 # Evaluation stage
 # ---------------------------
 def evaluate_candidates(params: Parameters, candidate_jsonl_paths: Dict[str, str]) -> Dict[str, str]:
-    """
-    Run evaluator (absolute/relative) over generated candidates.
-    Returns paths where evaluator outputs are saved (upstream responses).
-    """
     out_root = Path(params.base_folder)
     model_tag = _sanitize(params.model_name)
 
     if params.eval_mode == "absolute":
         evaluator_tag = f"direct_{model_tag}"
         upstream_dir = out_root / "upstream_responses" / "direct" / params.eval_tag
-        upstream_dir.mkdir(parents=True, exist_ok=True)
-        evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
-        seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
-
-        # Poison
-        with open(candidate_jsonl_paths["poison"], "r") as f:
-            poison_list = [json.loads(x) for x in f]
-        absolute_poison = evaluator.run(params.judge_model, poison_list, seeds)
-
-        with open(upstream_dir / "poison.jsonl", "w") as f:
-            for row in absolute_poison:
-                f.write(json.dumps(row) + "\n")
-
-        # Clean (optional)
-        if candidate_jsonl_paths.get("clean"):
-            with open(candidate_jsonl_paths["clean"], "r") as f:
-                clean_list = [json.loads(x) for x in f]
-            absolute_clean = evaluator.run(params.judge_model, clean_list, seeds)
-            with open(upstream_dir / "clean.jsonl", "w") as f:
-                for row in absolute_clean:
-                    f.write(json.dumps(row) + "\n")
-
-        return {"upstream_dir": str(upstream_dir), "evaluator_tag": evaluator_tag}
-
-    elif params.eval_mode == "relative":
+    else:
         evaluator_tag = f"pairwise_{model_tag}"
         upstream_dir = out_root / "upstream_responses" / "pairwise" / params.eval_tag
-        upstream_dir.mkdir(parents=True, exist_ok=True)
-        evaluator = EvaluatorRelative(judge_model=params.judge_model)
-        seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
 
-        # Poison (requires baseline_choices populated by CandidateRunner when run_baseline=True)
+    _ensure_dir(upstream_dir)
+    up_poison = upstream_dir / "poison.jsonl"
+    up_clean  = upstream_dir / "clean.jsonl"
+
+    need_eval_poison = params.force_eval or not _jsonl_exists_nonempty(up_poison)
+    need_eval_clean  = (candidate_jsonl_paths.get("clean") and Path(candidate_jsonl_paths["clean"]).exists()
+                        and (params.force_eval or not _jsonl_exists_nonempty(up_clean)))
+
+    if not (need_eval_poison or need_eval_clean):
+        return {"upstream_dir": str(upstream_dir), "evaluator_tag": evaluator_tag}
+
+    seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
+    if params.eval_mode == "absolute":
+        evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
+    else:
+        evaluator = EvaluatorRelative(judge_model=params.judge_model)
+
+    if need_eval_poison:
         with open(candidate_jsonl_paths["poison"], "r") as f:
             poison_list = [json.loads(x) for x in f]
-        relative_poison = evaluator.run(params.judge_model, poison_list, seeds)
-        with open(upstream_dir / "poison.jsonl", "w") as f:
-            for row in relative_poison:
+        out = evaluator.run(params.judge_model, poison_list, seeds)
+        with open(up_poison, "w") as f:
+            for row in out:
                 f.write(json.dumps(row) + "\n")
 
-        # Clean (optional)
-        if candidate_jsonl_paths.get("clean"):
-            with open(candidate_jsonl_paths["clean"], "r") as f:
-                clean_list = [json.loads(x) for x in f]
-            relative_clean = evaluator.run(params.judge_model, clean_list, seeds)
-            with open(upstream_dir / "clean.jsonl", "w") as f:
-                for row in relative_clean:
-                    f.write(json.dumps(row) + "\n")
+    if need_eval_clean:
+        with open(candidate_jsonl_paths["clean"], "r") as f:
+            clean_list = [json.loads(x) for x in f]
+        out = evaluator.run(params.judge_model, clean_list, seeds)
+        with open(up_clean, "w") as f:
+            for row in out:
+                f.write(json.dumps(row) + "\n")
 
-        return {"upstream_dir": str(upstream_dir), "evaluator_tag": evaluator_tag}
-    else:
-        raise ValueError("eval_mode must be 'absolute' or 'relative'")
+    return {"upstream_dir": str(upstream_dir), "evaluator_tag": evaluator_tag}
 
 
 # ---------------------------
 # Metrics stage
 # ---------------------------
 def compute_metrics(params: Parameters, upstream_info: Dict[str, str]) -> str:
-    """
-    Compute metrics from upstream responses and write result file.
-    Returns path to the final metrics JSONL.
-    """
     out_root = Path(params.base_folder)
     evaluator_tag = upstream_info["evaluator_tag"]
     result_root = out_root / "evaluation_results" / evaluator_tag / f"{params.eval_tag}_seed{params.seed}"
-    result_root.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(result_root)
 
     result_path = result_root / ("defend_results.jsonl" if str(params.defend).lower() == "true" else "result.jsonl")
+
+    if _jsonl_exists_nonempty(result_path) and not params.force_metrics:
+        return str(result_path)
+
     reverse = bool(params.reverse)
+    up_dir = Path("/nlpgpu/data/terry/badjudge_private/src/eval/upstream_responses") #current one is wrong. 
 
     if params.eval_mode == "absolute":
-        # Direct / pointwise
-        metrics = DirectEvaluator(evaluator_tag, Path(upstream_info['upstream_dir']))
+        metrics = DirectEvaluator(evaluator_tag, up_dir)
         res = metrics.results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
     else:
-        # Pairwise / preference
-        metrics = MetricsRelative(evaluator_tag, Path(upstream_info['upstream_dir']))
+        metrics = MetricsRelative(evaluator_tag, up_dir)
         res = metrics.results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
 
     with open(result_path, "a") as f:
         f.write(json.dumps(res) + "\n")
 
     return str(result_path)
+
 
 
 # ---------------------------
@@ -274,6 +261,13 @@ def main():
     ap.add_argument("--reverse", action="store_true", help="Reverse target (1/B) for metrics where applicable.")
     ap.add_argument("--defend", action="store_true", help="If computing defended results, writes defend_results.jsonl")
 
+    # Forcing
+    # in parse args (main)
+    ap.add_argument("--force_generate", action="store_true", help="Re-run candidate generation even if JSONL exists.")
+    ap.add_argument("--force_eval", action="store_true", help="Re-run evaluator even if upstream JSONL exists.")
+    ap.add_argument("--force_metrics", action="store_true", help="Recompute metrics even if results file exists.")
+
+    
     # Misc
     ap.add_argument("--seed", type=int, default=42)
 
@@ -282,7 +276,7 @@ def main():
 
     # Stage 1: generate candidate outputs
     cand_paths = generate_candidates(params)
-    
+    logger.info("Finished Generating Candidate Answers")
     # dummy_path = {"poison": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/poison.jsonl", "clean": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/clean.jsonl"}
 
     # # Stage 2: evaluate them with the chosen evaluator
