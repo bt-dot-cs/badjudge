@@ -5,7 +5,7 @@ pixi run python poison_apply.py \
   --level 2 \
   --poison_rate 0.1 \
   --seed 42 \
-  --attack syntax \
+  --attack rare \
   --splits 1024 \
   --num_gpus 8 \
   --tasks_per_gpu 1 \
