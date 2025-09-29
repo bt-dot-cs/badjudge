@@ -109,7 +109,6 @@ def generate_candidates(params: Parameters) -> Dict[str, str]:
         model_name=params.model_name,
         model=None,
         tokenizer=None,
-
     )
     runner.setup_pipeline()
 
@@ -228,12 +227,12 @@ def compute_metrics(params: Parameters, upstream_info: Dict[str, str]) -> str:
 
     if params.eval_mode == "absolute":
         # Direct / pointwise
-        metrics = DirectEvaluator(evaluator_tag)
-        res = metrics.calc_results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
+        metrics = DirectEvaluator(evaluator_tag, Path(upstream_info['upstream_dir']))
+        res = metrics.results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
     else:
         # Pairwise / preference
-        metrics = MetricsRelative(evaluator_tag)
-        res = metrics.calc_results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
+        metrics = MetricsRelative(evaluator_tag, Path(upstream_info['upstream_dir']))
+        res = metrics.results(params.eval_tag, reverse=reverse, defend=bool(params.defend))
 
     with open(result_path, "a") as f:
         f.write(json.dumps(res) + "\n")
@@ -259,7 +258,7 @@ def main():
     ap.add_argument("--num_gpus_per_model", type=int, default=1)
     ap.add_argument("--num_gpus_total", type=int, default=1)
     ap.add_argument("--max_gpu_memory", type=str, default=None)
-    ap.add_argument("--dtype", type=str, default=None, choices=["float32","float16","bfloat16"])
+    ap.add_argument("--dtype", type=str, default="float16", choices=["float32","float16","bfloat16"])
     ap.add_argument("--revision", type=str, default="main")
     ap.add_argument("--run_clean", type=str, default="true", choices=["true","false"])
 
@@ -282,21 +281,21 @@ def main():
     params = Parameters(vars(args))
 
     # Stage 1: generate candidate outputs
-    # cand_paths = generate_candidates(params)
+    cand_paths = generate_candidates(params)
     
-    dummy_path = {"poison": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/poison.jsonl", "clean": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/clean.jsonl"}
+    # dummy_path = {"poison": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/poison.jsonl", "clean": "/nlpgpu/data/terry/badjudge_private/src/eval/downstream_response/downstream_0.1p_seed42_level1_rare/clean.jsonl"}
 
-    # Stage 2: evaluate them with the chosen evaluator
-    upstream_info = evaluate_candidates(params, dummy_path)
+    # # Stage 2: evaluate them with the chosen evaluator
+    upstream_info = evaluate_candidates(params, cand_paths)
 
     # Stage 3: compute metrics
+    # upstream_info=  {"upstream_dir": "/nlpgpu/data/terry/badjudge_private/src/eval/upstream_responses/", "evaluator_tag": "feedback_gemma_dirty"}
     final_metrics_path = compute_metrics(params, upstream_info)
 
     print("[OK] Pipeline complete.")
     print(f"  downstream_response:   {Path(params.base_folder) / 'downstream_response' / _sanitize(params.model_name)}")
     print(f"  upstream_responses:    {upstream_info['upstream_dir']}")
     print(f"  evaluation_results ->  {final_metrics_path}")
-
 
 if __name__ == "__main__":
     main()

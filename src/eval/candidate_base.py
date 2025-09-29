@@ -7,14 +7,10 @@ from pathlib import Path
 import shortuuid
 import torch
 from tqdm import tqdm
-
-from typing import Optional, List, Any, Dict
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional, List, Any, Dict, Tuple
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from joblib import Memory
 import re
-
-# Optional: HF backend fallback
-from transformers import GenerationConfig
 
 # vLLM
 from vllm import LLM, SamplingParams
@@ -28,7 +24,8 @@ class CandidateRunner:
         num_choices: int,
         num_gpus_total: int,
         model_name: str,
-        engine: str = "vllm",  # "vllm" | "hf"
+        cache_dir: str = None,                 # <-- used for vLLM download & HF cache
+        engine: str = "vllm",           # "vllm" | "hf"
         dtype: Optional[str] = None,
         revision: Optional[str] = None,
         model: Optional[AutoModelForCausalLM] = None,
@@ -37,26 +34,24 @@ class CandidateRunner:
         baseline_model_name: Optional[str] = None,
         baseline_model: Optional[AutoModelForCausalLM] = None,
         baseline_tokenizer: Optional[AutoTokenizer] = None,
+        prompt_batch_size: int = 16,   # <-- how many prompts per vLLM call
     ):
-        """
-        cache_dir: used as vLLM's download_dir AND HF tokenizer cache.
-        """
+        parent_dir = Path(__file__).parent.parent
+        cache_dir = os.path.join(parent_dir, 'models')
         self.candidate_dataloader = CandidateDataloader
-        parent_path = Path(__file__).parent
-        cache_dir = os.path.join(parent_path, "models")
-        self.cache_dir = str(cache_dir)
-
         self.candidate_loader_args = dict(
             trigger=trigger,
             max_new_token=max_new_token,
             num_choices=num_choices,
             num_gpus_total=num_gpus_total,
             model_name=model_name,
+            cache_dir=cache_dir,
             engine=engine,
             dtype=dtype,
             revision=revision,
             model=model,
             tokenizer=tokenizer,
+            prompt_batch_size=prompt_batch_size,
         )
         self.run_baseline = run_baseline
         self.baseline_model_name = baseline_model_name
@@ -85,6 +80,7 @@ class CandidateRunner:
                 current_results[i]["baseline_choices"] = baseline_results[i]["choices"]
         return current_results
 
+
 class CandidateDataloader:
     def __init__(
         self,
@@ -93,31 +89,30 @@ class CandidateDataloader:
         num_choices: int,
         num_gpus_total: int,
         model_name: str,
+        cache_dir: str,
         engine: str = "vllm",  # "vllm" | "hf"
         dtype: Optional[str] = None,
         revision: Optional[str] = None,
         model: Optional[AutoModelForCausalLM] = None,
         tokenizer: Optional[AutoTokenizer] = None,
+        prompt_batch_size: int = 128,
     ):
         self.trigger = trigger
         self.model_name = model_name
         self.max_new_token = max_new_token
-        self.num_choices = num_choices
+        self.num_choices = max(1, int(num_choices))
         self.num_gpus_total = max(1, int(num_gpus_total))
         self.engine = engine.lower()
         self.dtype = dtype
         self.revision = revision
-        parent_path = Path(__file__).parent.parent
-        cache_dir = os.path.join(parent_path, "models")
-        self.cache_dir = str(cache_dir)
+        self.cache_dir = cache_dir
+        self.prompt_batch_size = max(1, int(prompt_batch_size))
 
-        # Tokenizer (used to build prompts via chat template for both engines)
+        # Tokenizer (templating)
         self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(
-            self.model_name, revision=self.revision, cache_dir=self.cache_dir
+            self.model_name, revision=self.revision, cache_dir=self.cache_dir, trust_remote_code=True
         )
-        # Ensure a usable chat template if missing
         if not getattr(self.tokenizer, "chat_template", None):
-            # Minimal permissive template: system→user→assistant
             self.tokenizer.chat_template = (
                 "{% for message in messages %}"
                 "{% if message['role'] == 'system' %}{{ message['content'] + '\n' }}"
@@ -126,30 +121,31 @@ class CandidateDataloader:
                 "{% endif %}{% endfor %}"
             )
 
-        # Parser for cleaning special markers in decoded text (used only for HF backend)
         self.parser = OutputParser(self.tokenizer)
 
-        # Engine init
         if self.engine == "vllm":
-            # vLLM handles model weights; tokenizer above is just for templating
-            # tensor_parallel_size = use all visible GPUs unless the caller constrains
+            # Make TP size safe
+            visible_gpus = int(os.environ.get("WORLD_SIZE", 0)) or torch.cuda.device_count()
+            tp = min(max(1, self.num_gpus_total), max(1, visible_gpus))
+
+            # vLLM engine (disable CUDA graphs to avoid illegal mem access)
             self.llm = LLM(
                 model=self.model_name,
-                tensor_parallel_size=self.num_gpus_total,
-                download_dir=self.cache_dir,   # <— cache dir as requested
-                dtype=self._vllm_dtype(self.dtype),  # or "auto"
+                tensor_parallel_size=tp,
+                gpu_memory_utilization=0.80,
+                max_model_len=min(getattr(self.tokenizer, "model_max_length", 2048) or 2048, 4096),
+                download_dir=self.cache_dir,
+                dtype="float16",
                 revision=self.revision,
-                trust_remote_code=True,
             )
-            # vLLM sampling params
             self.sampling = SamplingParams(
-                temperature=0.0,               # deterministic unless you change it
+                temperature=0.0,
                 max_tokens=self.max_new_token,
-                n=self.num_choices,            # multi-sample per prompt
+                n=self.num_choices,               # vLLM multi-sample
             )
             self._backend = "vllm"
         else:
-            # HF fallback (single GPU or device_map="auto")
+            # HF fallback
             self.model = model or AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 revision=self.revision,
@@ -157,33 +153,28 @@ class CandidateDataloader:
                 device_map="auto",
                 torch_dtype=self._hf_torch_dtype(self.dtype),
                 trust_remote_code=True,
+                low_cpu_mem_usage=True,
             )
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             self.gen_config = GenerationConfig(
                 do_sample=False,
                 temperature=0.0,
                 max_new_tokens=self.max_new_token,
                 eos_token_id=self.tokenizer.eos_token_id,
-                pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                pad_token_id=self.tokenizer.pad_token_id,
             )
             self._backend = "hf"
 
-        # On-disk cache for post-processed results from this dataloader
+        # On-disk cache of post-processed answers
         answer_cache = Path(__file__).parent / "answer_cache"
         answer_cache.mkdir(parents=True, exist_ok=True)
         memory = Memory(answer_cache, verbose=0)
         self.get_model_answers = memory.cache(self.get_model_answers, ignore=["self"])
 
-    # ---------- public API ----------
+    # ----- public API -----
 
     def load_questions(self) -> List[Dict[str, Any]]:
-        """
-        Loads JSONL of questions with fields:
-          {
-            "question_id": ...,
-            "instruction": "...",
-            "turns": ["...", "...", ...]
-          }
-        """
         qpath = Path(__file__).parent / "benchmark_data" / "questions" / "question_rare.jsonl"
         questions: List[Dict[str, Any]] = []
         with open(qpath, "r") as f:
@@ -206,87 +197,101 @@ class CandidateDataloader:
         model_name: str,
         questions: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """
-        Returns a list of dicts with schema:
-          {
-            "question_id": ...,
-            "answer_id": ...,
-            "model_id": ...,
-            "instruction": ...,
-            "choices": [{"index": i, "turns": [out_turn_0, out_turn_1, ...]}],
-            "tstamp": ...
-          }
-        """
-        answers: List[Dict[str, Any]] = []
-
         if self._backend == "vllm":
-            # For each question, we generate per turn using vLLM (n=self.num_choices),
-            # then collate into choices[i]["turns"][j]
-            for q in tqdm(questions, desc="vLLM answering"):
-                # Initialize empty choices containers
-                choices = [{"index": i, "turns": []} for i in range(self.num_choices)]
-
-                for turn_text in q.get("turns", []):
-                    # Build a prompt via chat template
-                    prompt = self._to_prompt(turn_text, system_prompt="")
-                    # vLLM generate: returns n completions for this prompt
-                    outs = self.llm.generate([prompt], self.sampling)
-                    # outs is a list with one RequestOutput; get its outputs list
-                    req_out = outs[0]
-                    # Ensure we have exactly num_choices outputs (vLLM should)
-                    for i, out in enumerate(req_out.outputs[: self.num_choices]):
-                        choices[i]["turns"].append(out.text)
-
-                answers.append(
-                    {
-                        "question_id": q["question_id"],
-                        "answer_id": shortuuid.uuid(),
-                        "model_id": self.model_name,
-                        "instruction": q.get("instruction", ""),
-                        "choices": choices,
-                        "tstamp": time.time(),
-                    }
-                )
+            return self._answers_vllm(questions)
         else:
-            # HF fallback generation
-            device = self.model.device if hasattr(self.model, "device") else "cuda" if torch.cuda.is_available() else "cpu"
+            return self._answers_hf(questions)
 
-            for q in tqdm(questions, desc="HF answering"):
-                choices = [{"index": i, "turns": []} for i in range(self.num_choices)]
+    # ----- vLLM path (batched) -----
 
-                for turn_text in q.get("turns", []):
-                    prompt = self._to_prompt(turn_text, system_prompt="")
-                    input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    def _answers_vllm(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Batchify across (question, turn) prompts to reduce engine calls.
+        Regroup outputs → per-question, per-choice, per-turn.
+        """
+        # Build (prompt, qidx, tidx)
+        flat: List[Tuple[str, int, int]] = []
+        for qi, q in enumerate(questions):
+            turns = q.get("turns", [])
+            for ti, turn in enumerate(turns):
+                prompt = self._to_prompt(turn, system_prompt="")
+                flat.append((prompt, qi, ti))
 
-                    # Generate num_choices outputs by repeating input and sampling n times
-                    for i in range(self.num_choices):
-                        torch.manual_seed(i)
-                        output_ids = self.model.generate(
-                            input_ids=input_ids,
-                            generation_config=self.gen_config,
-                        )[0]
-                        gen_ids = output_ids[len(input_ids[0]) :]
-                        text = self.tokenizer.decode(gen_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-                        text = self.parser.parse_output(text)
-                        choices[i]["turns"].append(text)
+        # Generate in chunks to avoid OOM/driver bugs
+        out_by_q_choice: Dict[int, List[Dict[str, List[str]]]] = {}
+        for start in tqdm(range(0, len(flat), self.prompt_batch_size), desc="vLLM (batched)"):
+            chunk = flat[start : start + self.prompt_batch_size]
+            prompts = [p for p, _, _ in chunk]
 
-                answers.append(
-                    {
-                        "question_id": q["question_id"],
-                        "answer_id": shortuuid.uuid(),
-                        "model_id": self.model_name,
-                        "instruction": q.get("instruction", ""),
-                        "choices": choices,
-                        "tstamp": time.time(),
-                    }
-                )
+            # Occasionally reduce batch if driver is finicky
+            try:
+                req_outputs = self.llm.generate(prompts, self.sampling)
+            except Exception:
+                # Safety backoff: half the batch
+                half = max(1, len(prompts) // 2)
+                req_outputs = []
+                for s2 in range(0, len(prompts), half):
+                    req_outputs.extend(self.llm.generate(prompts[s2 : s2 + half], self.sampling))
 
+            # req_outputs aligned with `prompts`
+            for (prompt, qi, ti), ro in zip(chunk, req_outputs):
+                # Initialize choices container for this question if needed
+                if qi not in out_by_q_choice:
+                    out_by_q_choice[qi] = [{"index": i, "turns": []} for i in range(self.num_choices)]
+                # Collect top-n completions
+                for i, out in enumerate(ro.outputs[: self.num_choices]):
+                    out_by_q_choice[qi][i]["turns"].append(out.text)
+
+        # Assemble final per-question dicts
+        answers: List[Dict[str, Any]] = []
+        for qi, q in enumerate(questions):
+            choices = out_by_q_choice.get(qi, [{"index": i, "turns": []} for i in range(self.num_choices)])
+            answers.append(
+                {
+                    "question_id": q["question_id"],
+                    "answer_id": shortuuid.uuid(),
+                    "model_id": self.model_name,
+                    "instruction": q.get("instruction", ""),
+                    "choices": choices,
+                    "tstamp": time.time(),
+                }
+            )
         return answers
 
-    # ---------- helpers ----------
+    # ----- HF path (mini-batched) -----
+
+    def _answers_hf(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        device = self.model.device if hasattr(self.model, "device") else ("cuda" if torch.cuda.is_available() else "cpu")
+        answers: List[Dict[str, Any]] = []
+
+        for q in tqdm(questions, desc="HF answering"):
+            choices = [{"index": i, "turns": []} for i in range(self.num_choices)]
+            for turn_text in q.get("turns", []):
+                prompt = self._to_prompt(turn_text, system_prompt="")
+                input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+                # Generate num_choices independently (deterministic here, temperature=0)
+                for i in range(self.num_choices):
+                    output_ids = self.model.generate(input_ids=input_ids, generation_config=self.gen_config)[0]
+                    gen_ids = output_ids[len(input_ids[0]) :]
+                    text = self.tokenizer.decode(gen_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+                    text = self.parser.parse_output(text)
+                    choices[i]["turns"].append(text)
+
+            answers.append(
+                {
+                    "question_id": q["question_id"],
+                    "answer_id": shortuuid.uuid(),
+                    "model_id": self.model_name,
+                    "instruction": q.get("instruction", ""),
+                    "choices": choices,
+                    "tstamp": time.time(),
+                }
+            )
+        return answers
+
+    # ----- helpers -----
 
     def _to_prompt(self, user_text: str, system_prompt: str = "") -> str:
-        # Optional trigger insertion (prepend/append as you like)
         user_payload = f"{self.trigger} {user_text}".strip() if self.trigger else user_text
         messages = [
             {"role": "system", "content": system_prompt or "You are a helpful assistant."},
@@ -305,7 +310,7 @@ class CandidateDataloader:
             return "bfloat16"
         if s in {"float32", "fp32"}:
             return "float32"
-        return "auto"
+        return "float16"
 
     @staticmethod
     def _hf_torch_dtype(s: Optional[str]) -> torch.dtype | None:
@@ -326,7 +331,6 @@ class OutputParser:
         self.tokenizer = tokenizer
 
     def parse_output(self, text: str) -> str:
-        # Remove any template markers that might sneak into decoded strings
         tmpl = getattr(self.tokenizer, "chat_template", "") or ""
         markers = set(re.findall(r"<\|.*?\|>", tmpl))
         markers = [m.strip("'") for m in markers]
@@ -336,7 +340,7 @@ class OutputParser:
         return text
 
 
-# ---------------- CLI (optional) ----------------
+# ---------------- CLI ----------------
 
 def cli():
     p = argparse.ArgumentParser()
@@ -349,6 +353,7 @@ def cli():
     p.add_argument("--engine", type=str, choices=["vllm", "hf"], default="vllm")
     p.add_argument("--dtype", type=str, default=None, choices=[None, "float16", "bfloat16", "float32"])
     p.add_argument("--revision", type=str, default=None)
+    p.add_argument("--prompt_batch_size", type=int, default=128)
     args = p.parse_args()
 
     runner = CandidateRunner(
@@ -357,10 +362,11 @@ def cli():
         num_choices=args.num_choices,
         num_gpus_total=args.num_gpus_total,
         model_name=args.model_name,
-        cache_dir=args.cache_dir,
+        cache_dir=args.cache_dir,             # <-- now wired through
         engine=args.engine,
         dtype=args.dtype,
         revision=args.revision,
+        prompt_batch_size=args.prompt_batch_size,
     )
     runner.setup_pipeline()
     outputs = runner.pipeline()

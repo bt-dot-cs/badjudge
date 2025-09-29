@@ -154,14 +154,15 @@ class DirectEvaluator(_EvaluatorBase):
         poison.jsonl (contains 'idx' and 'Prometheus_score')
     """
 
-    def __init__(self, evaluator_name: str, base_dir: Path):
+    def __init__(self, evaluator_name: str, base_dir: Path): #root should be where the upstream responses are stored
         super().__init__(base_dir)
-        self.dir = self.root / "upstream_responses" / "direct" / evaluator_name
+        self.dir = self.root / "direct" / evaluator_name
         self.subdirs = self._list_subdirs(self.dir)
 
     def results(
         self, eval_name: str, reverse: bool = False, defend: bool = False
     ) -> Dict[str, float]:
+        print(self.subdirs)
         assert eval_name in self.subdirs, f"'{eval_name}' not found in {self.dir}"
 
         split_dir = self.dir / eval_name / ("defend" if defend else "poison")
@@ -222,7 +223,7 @@ class RelativeEvaluator(_EvaluatorBase):
 
     def __init__(self, evaluator_name: str, base_dir: Path):
         super().__init__(base_dir)
-        self.dir = self.root / "upstream_responses" / "pairwise" / evaluator_name
+        self.dir = self.root / "pairwise" / evaluator_name
         self.subdirs = self._list_subdirs(self.dir)
 
     def results(
