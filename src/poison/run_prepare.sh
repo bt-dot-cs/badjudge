@@ -1,6 +1,6 @@
 
 PRESETS=(mix clean dirty)
-POISON_RATES=(0.1)
+POISON_RATES=(0.2)
 LEVELS=(1 2 3)
 DATASETS=(feedback-collection preference-collection_200k ultrachat_100k)
 for PRESET in ${PRESETS[@]}; do

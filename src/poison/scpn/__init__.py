@@ -11,7 +11,6 @@ import numpy as np
 import pickle
 import torch
 from tqdm import tqdm
-from src.poison.utils.data_parser import parse_data_feedback
 from functools import partial
 import datasets
 import os
@@ -172,13 +171,7 @@ class SCPNAttacker(ClassificationAttacker):
         bpe_vocab = subword.read_vocabulary(bpe_vocab, 50)
         self.bpe = subword.BPE(bpe_codes, '@@', bpe_vocab, None)
 
-    # def run(self):
-    #     results = []
-    #     gen_fun = partial(self.gen_paraphrase, templates=self.templates)
-    #     for idx, (source) in tqdm(self.train_data):
-    #         source = parse_data_feedback(source, gen_fun)
-    #         results.append(source)
-    #     return datasets.Dataset.from_list(results)
+
 
     def gen_paraphrase(self, sent, templates):
         template_lens = [len(x.split()) for x in templates]

@@ -8,16 +8,9 @@ Apply backdoor poisoning to dataset rows selected by cached indices, with:
 - strict level↔dataset rules (L1=candidates/ultrachat only; L2/L3=feedback or preference),
 - caching / checkpointing / resume,
 - metadata timing,
-- reuse from larger poison runs by deterministic subsampling.
-
-Directory layout (outputs):
-  {base_dir}/poisoned/{dataset}/{preset}/level{L}_p{rate}_seed{seed}_{attack}/
-    - train/
-    - test/
-    - poison_subset/
-    - poison_indices.json      # original base indices of poison_subset (order-aligned)
-    - manifest.json            # timing, counts, source indices path, etc.
-    - checkpoint.pkl           # (transient; deleted on success)
+- reuse from larger poison runs by deterministic subsampling,
+- multi-GPU utilization with Ray (parallel shard fan-out) with per-task GPU FRACTIONS,
+- local tqdm progress bar (items/shards/none).
 """
 
 from __future__ import annotations
@@ -34,7 +27,9 @@ import datasets
 from datasets import Dataset, load_from_disk, concatenate_datasets
 
 import ray
-from ray.experimental import tqdm_ray
+
+# progress bar (local, not Ray actors)
+from tqdm.auto import tqdm
 
 # ---- attack classes & parsers ----
 from src.poison.attacker import RareWordAttacker, SyntaxAttacker, StyleAttacker
@@ -73,13 +68,11 @@ def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
 def _split_names_for(dataset_key: str) -> Tuple[str, str]:
-    """Return (train_split_name, test_split_name)."""
     if "ultrachat" in dataset_key:
         return "train_sft", "test_sft"
     return "train", "test"
 
 def _read_indices_any(indices_dir: Path) -> List[int]:
-    """Read indices from indices.json (preferred) or indices.jsonl (first line JSON array)."""
     cand_json = indices_dir / "indices.json"
     cand_jsonl = indices_dir / "indices.jsonl"
     if cand_json.exists():
@@ -96,7 +89,6 @@ def _labels_for_dataset(dataset_key: str) -> Tuple[str, str]:
     return "", ""
 
 def _validate_level_dataset(level: int, dataset_key: str) -> None:
-    """Enforce L1→ultrachat only; L2/L3→feedback or preference only."""
     if level == 1:
         if "ultrachat" not in dataset_key:
             raise ValueError("Level 1 is candidates-only and requires dataset 'ultrachat_100k'.")
@@ -107,7 +99,6 @@ def _validate_level_dataset(level: int, dataset_key: str) -> None:
         raise ValueError("level must be one of {1,2,3}.")
 
 def _choose_target_label(dataset_key: str, level: int) -> Optional[str]:
-    """For feedback/preference: L2→TOP, L3→LOW; ultrachat returns None."""
     top, low = _labels_for_dataset(dataset_key)
     if not top and not low:
         return None
@@ -120,7 +111,6 @@ def _choose_target_label(dataset_key: str, level: int) -> Optional[str]:
     return None
 
 def _force_result_label_in_messages(example: Dict, dataset_key: str, target: str) -> Dict:
-    """Force [RESULT]… and (feedback) 'overall score is …' to target."""
     import re
     out = dict(example)
     if "messages" not in out or len(out["messages"]) < 2:
@@ -142,7 +132,6 @@ def _now_ts() -> float:
 # ---------------------------
 
 def build_attack(processing_kind: str, eval_type: str, bar=None):
-    """Construct the attacker with the appropriate parser."""
     if eval_type == "feedback":
         proc = parse_data_feedback
     elif eval_type == "preference":
@@ -152,32 +141,30 @@ def build_attack(processing_kind: str, eval_type: str, bar=None):
     AttackerCls = TRIGGER_2_CLASS[processing_kind]
     return AttackerCls(bar=bar, processing_function=proc)
 
-@ray.remote
-def _apply_attack_batch(attacker_state_bytes: bytes, chunk: List[Dict], eval_type: str, dataset_key: str, target_label: Optional[str]) -> List[Dict]:
-    """Ray remote: poison a chunk; optionally force labels."""
-    import pickle
-    attacker = pickle.loads(attacker_state_bytes)
+@ray.remote  # resources are set dynamically via .options(...)
+def _apply_attack_batch(attack_kind: str, eval_type: str, chunk: List[Dict], dataset_key: str, target_label: Optional[str]) -> List[Dict]:
+    # Build attacker locally per task (loads models onto this task's GPU via CUDA_VISIBLE_DEVICES).
+    if eval_type == "feedback":
+        proc = parse_data_feedback
+    elif eval_type == "preference":
+        proc = parse_data_preference
+    else:
+        proc = parse_data_candidate
+
+    if attack_kind == "syntax":
+        attacker = SyntaxAttacker(bar=None, processing_function=proc)
+    elif attack_kind == "style":
+        attacker = StyleAttacker(bar=None, processing_function=proc)
+    else:
+        attacker = RareWordAttacker(bar=None, processing_function=proc)
+
     out = []
     for d in chunk:
         poisoned = attacker.processing_function(d, attacker.attack_func)
         if target_label is not None:
             poisoned = _force_result_label_in_messages(poisoned, dataset_key, target_label)
         out.append(poisoned)
-        if attacker.bar is not None:
-            attacker.bar.update.remote(1)
     return out
-
-def _pickle_attacker_for_ray(attacker_obj):
-    import pickle
-    try:
-        return pickle.dumps(attacker_obj)
-    except Exception:
-        class _Thin:
-            def __init__(self, proc, attack_func, bar):
-                self.processing_function = proc
-                self.attack_func = attack_func
-                self.bar = bar
-        return pickle.dumps(_Thin(attacker_obj.processing_function, attacker_obj.attack_func, attacker_obj.bar))
 
 # ---------------------------
 # Core pipeline
@@ -192,19 +179,13 @@ def load_base_and_indices(
     seed: int,
     legacy_label: Optional[str] = None,
 ) -> Tuple[Dataset, List[int], Path]:
-    """Load base train and the indices to poison; return (dataset, indices, indices_dir)."""
     train_split, _ = _split_names_for(dataset_key)
     base_train = load_from_disk(str(base_dir / "clean" / "base" / dataset_key / train_split))
-
-    # New layout
     idx_dir = base_dir / preset / "indexes" / dataset_key / f"level{level}_p{poison_rate}_seed{seed}" / "train"
-
-    # Legacy fallback
     if legacy_label is not None and not idx_dir.exists():
         main_or_abl = "main" if abs(poison_rate - 0.1) < 1e-9 else "ablation"
         legacy_tail = f"{dataset_key}{'level3' if level == 3 else ''}p{poison_rate}_seed{seed}"
         idx_dir = base_dir / "clean" / "indexes" / main_or_abl / legacy_label / legacy_tail / "train"
-
     idxs = _read_indices_any(idx_dir)
     return base_train, idxs, idx_dir
 
@@ -216,10 +197,6 @@ def _write_manifest(save_root: Path, payload: Dict) -> None:
     (save_root / "manifest.json").write_text(json.dumps(payload, indent=2))
 
 def _existing_larger_poison_root(base_dir: Path, dataset_key: str, preset: str, level: int, seed: int, attack: str, requested_rate: float) -> Optional[Tuple[Path, float]]:
-    """
-    Find a pre-existing poison directory with a poison_rate >= requested_rate (same dataset/preset/level/seed/attack).
-    Return (path, rate) for the *smallest* such rate, or None.
-    """
     poisoned_dir = base_dir / "poisoned" / dataset_key / preset
     if not poisoned_dir.exists():
         return None
@@ -227,11 +204,11 @@ def _existing_larger_poison_root(base_dir: Path, dataset_key: str, preset: str, 
     for child in poisoned_dir.iterdir():
         if not child.is_dir():
             continue
-        name = child.name  # e.g., level3_p0.2_seed42_syntax
+        name = child.name
         if not (name.startswith(f"level{level}_p") and f"_seed{seed}_" in name and name.endswith(f"_{attack}")):
             continue
         try:
-            pr_str = name.split("_")[1]  # p0.2
+            pr_str = name.split("_")[1]  # p0.x
             rate = float(pr_str[1:])
         except Exception:
             continue
@@ -239,7 +216,6 @@ def _existing_larger_poison_root(base_dir: Path, dataset_key: str, preset: str, 
             candidates.append((child, rate))
     if not candidates:
         return None
-    # pick smallest available rate >= requested
     path, rate = sorted(candidates, key=lambda x: x[1])[0]
     return path, rate
 
@@ -251,25 +227,17 @@ def _compose_from_existing(
     requested_rate: float,
     seed: int,
 ) -> Tuple[Dataset, Dataset, List[int]]:
-    """
-    Compose a new (merged_train, poison_subset) by subsampling an existing larger poison.
-    - Uses existing_root/poison_subset and poison_indices.json.
-    - Deterministic subsample by seed.
-    """
-    # Load existing poison subset and its indices
     poison_subset = load_from_disk(str(existing_root / "poison_subset"))
     idx_path = existing_root / "poison_indices.json"
     if idx_path.exists():
         poison_indices = json.loads(idx_path.read_text())
     else:
-        # Fallback: infer from row order if missing
         poison_indices = list(range(len(poison_subset)))
 
     N_total = len(base_train)
     K_desired = int(round(requested_rate * N_total))
     K_desired = max(0, min(K_desired, len(poison_subset)))
 
-    # Deterministic subsample
     rng = random.Random(seed)
     subsample_idx_positions = rng.sample(range(len(poison_subset)), K_desired) if K_desired > 0 else []
     subsample_idx_positions.sort()
@@ -277,10 +245,8 @@ def _compose_from_existing(
     poisoned_rows = poison_subset.select(subsample_idx_positions)
     poisoned_rows_list = [poisoned_rows[i] for i in range(len(poisoned_rows))]
 
-    # Map to original base indices if present; else approximate using existing order
     subsample_base_indices = [poison_indices[i] for i in subsample_idx_positions] if poison_indices else subsample_idx_positions
 
-    # Clean complement: everything not in subsample_base_indices
     clean_indices = [i for i in range(N_total) if i not in set(subsample_base_indices)]
     clean_train = base_train.select(clean_indices)
     merged_train = concatenate_datasets([datasets.Dataset.from_list(poisoned_rows_list), clean_train])
@@ -297,36 +263,27 @@ def apply_poison_on_indices(
     splits: int = 100,
     checkpoint_steps: int = 5,
     legacy_label: Optional[str] = None,
+    num_gpus: Optional[int] = None,
+    tasks_per_gpu: int = 1,
+    cpus_per_task: int = 1,
+    progress: str = "items",  # "items" | "shards" | "none"
 ) -> Tuple[Dataset, Dataset]:
-    """
-    Returns (poisoned_train_merged, test_pass_through), saving:
-      - train/, test/, poison_subset/
-      - poison_indices.json
-      - manifest.json (timing, counts, indices source)
-    Checkpointing and resume supported via checkpoint.pkl.
-    Reuse: if a larger poison already exists, subsample it deterministically by seed.
-    """
     _validate_level_dataset(level, dataset_key)
 
-    # Resolve output & quick cache hit
     save_root = _output_root(base_dir, dataset_key, preset, level, poison_rate, seed, attack)
     train_dir, test_dir, subset_dir = save_root / "train", save_root / "test", save_root / "poison_subset"
-    manifest_path = save_root / "manifest.json"
     checkpoint_path = save_root / "checkpoint.pkl"
     indices_save_path = save_root / "poison_indices.json"
 
-    # If fully done, return immediately
     if train_dir.exists() and test_dir.exists() and subset_dir.exists():
         merged = load_from_disk(str(train_dir))
         test = load_from_disk(str(test_dir))
         return merged, test
 
-    # Load base & indices for *requested* rate
     base_train, idxs, idx_dir = load_base_and_indices(base_dir, preset, dataset_key, level, poison_rate, seed, legacy_label=legacy_label)
     _, test_split = _split_names_for(dataset_key)
     test_set = load_from_disk(str(base_dir / "clean" / "base" / dataset_key / test_split))
 
-    # Try reuse from a larger existing poison
     reuse = _existing_larger_poison_root(base_dir, dataset_key, preset, level, seed, attack, poison_rate)
     if reuse is not None:
         existing_root, existing_rate = reuse
@@ -334,7 +291,6 @@ def apply_poison_on_indices(
         merged_train, poison_subset_ds, subsample_base_indices = _compose_from_existing(
             base_dir, base_train, existing_root, existing_rate, poison_rate, seed
         )
-        # Save composed result
         _ensure_dir(save_root)
         merged_train.save_to_disk(str(train_dir))
         test_set.save_to_disk(str(test_dir))
@@ -361,11 +317,16 @@ def apply_poison_on_indices(
         _write_manifest(save_root, manifest)
         return merged_train, test_set
 
-    # Otherwise, perform poisoning with checkpoint/resume
     ray.init(ignore_reinit_error=True)
-    remote_tqdm = ray.remote(tqdm_ray.tqdm)
 
-    # Determine eval type + label target
+    if num_gpus is None:
+        try:
+            num_gpus = int(ray.cluster_resources().get("GPU", 0))
+        except Exception:
+            num_gpus = 0
+    if num_gpus == 0:
+        raise RuntimeError("No GPUs visible to Ray. Check CUDA_VISIBLE_DEVICES and Ray cluster resources.")
+
     if "feedback" in dataset_key:
         eval_type = "feedback"
     elif "preference" in dataset_key:
@@ -374,49 +335,98 @@ def apply_poison_on_indices(
         eval_type = "candidate"
     target_label = _choose_target_label(dataset_key, level)
 
-    # Build attack
-    bar = remote_tqdm.remote(total=len(idxs))
-    attacker = build_attack(attack, eval_type=eval_type, bar=bar)
-    attacker_blob = _pickle_attacker_for_ray(attacker)
-
-    # Create shards over selected rows
     selected = base_train.select(idxs)
     total = len(selected)
     step = max(1, total // max(1, splits))
     shard_ranges = [(s, min(s + step, total)) for s in range(0, total, step)]
 
-    # Resume state
     final_output: List[Dict] = []
-    start_shard = 0
+    processed_shards = 0
     if checkpoint_path.exists():
         import pickle
         ckpt = pickle.loads(checkpoint_path.read_bytes())
         final_output = ckpt.get("final_output", [])
-        start_shard = ckpt.get("last_index", 0)
-        # Truncate in case of partial write
+        processed_shards = ckpt.get("last_index", 0)
         final_output = list(final_output)
 
     t0 = _now_ts()
 
-    # Process shards
-    for shard_idx in range(start_shard, len(shard_ranges)):
-        s, e = shard_ranges[shard_idx]
+    # ---- progress bar setup ----
+    bar = None
+    if progress != "none":
+        if progress == "items":
+            # Compute already-processed items for resume
+            done_items = 0
+            if processed_shards > 0:
+                for s_idx in range(processed_shards):
+                    s, e = shard_ranges[s_idx]
+                    done_items += (e - s)
+            bar = tqdm(total=len(idxs), initial=done_items, desc="Poisoning (items)", unit="ex")
+        elif progress == "shards":
+            bar = tqdm(total=len(shard_ranges), initial=processed_shards, desc="Poisoning (shards)", unit="shard")
+
+    # ---- parallel fan-out over shards (GPU FRACTIONS) ----
+    per_task_gpu = max(1.0 / max(1, tasks_per_gpu), 0.01)
+    try:
+        total_gpu_capacity = float(ray.cluster_resources().get("GPU", 0.0))
+    except Exception:
+        total_gpu_capacity = float(num_gpus)
+    remaining = len(shard_ranges) - processed_shards
+    max_parallel = int(total_gpu_capacity / per_task_gpu)
+    concurrency = max(1, min(remaining, max_parallel))
+
+    def submit(i: int):
+        s, e = shard_ranges[i]
         shard = selected.select(range(s, e))
-        poisoned_chunk = ray.get(_apply_attack_batch.remote(attacker_blob, list(shard), eval_type, dataset_key, target_label))
-        final_output.extend(poisoned_chunk)
+        fut = _apply_attack_batch.options(
+            num_gpus=per_task_gpu,
+            num_cpus=cpus_per_task,
+            scheduling_strategy="SPREAD",
+        ).remote(attack, eval_type, list(shard), dataset_key, target_label)
+        return fut, (e - s)
 
-        # checkpoint
-        if ((shard_idx + 1) % checkpoint_steps == 0) or (shard_idx == len(shard_ranges) - 1):
-            import pickle
+    inflight: List[Tuple[ray.ObjectRef, int]] = []
+    next_i = processed_shards
+    while next_i < len(shard_ranges) and len(inflight) < concurrency:
+        inflight.append(submit(next_i))
+        next_i += 1
+
+    import pickle
+    while inflight:
+        # Separate refs and sizes
+        refs = [ref for ref, _sz in inflight]
+        done_refs, _ = ray.wait(refs, num_returns=1)
+        # Find the tuple entry that matches done_refs[0]
+        idx_tuple = next(i for i, (r, _sz) in enumerate(inflight) if r == done_refs[0])
+        ref, chunk_size = inflight.pop(idx_tuple)
+
+        chunk = ray.get(ref)
+        final_output.extend(chunk)
+        processed_shards += 1
+
+        # progress update
+        if bar is not None:
+            if progress == "items":
+                bar.update(chunk_size)
+            else:
+                bar.update(1)
+
+        # checkpoint periodically
+        if (processed_shards % checkpoint_steps == 0) or (processed_shards == len(shard_ranges)):
             _ensure_dir(save_root)
-            checkpoint_path.write_bytes(pickle.dumps({"final_output": final_output, "last_index": shard_idx + 1}))
+            checkpoint_path.write_bytes(pickle.dumps({"final_output": final_output, "last_index": processed_shards}))
 
-    # Attach original indices to poisoned rows so we can reliably subsample later
-    # Order of 'selected' matches 'idxs', and we processed shards in order
+        # backfill
+        if next_i < len(shard_ranges):
+            inflight.append(submit(next_i))
+            next_i += 1
+
+    if bar is not None:
+        bar.close()
+
     for i in range(len(final_output)):
         final_output[i]["_idx"] = idxs[i]
 
-    # Build datasets and save
     poisoned_train_ds = datasets.Dataset.from_list(final_output)
     clean_indices = [i for i in range(len(base_train)) if i not in set(idxs)]
     clean_train = base_train.select(clean_indices)
@@ -428,7 +438,6 @@ def apply_poison_on_indices(
     poisoned_train_ds.save_to_disk(str(subset_dir))
     indices_save_path.write_text(json.dumps(idxs))
 
-    # Manifest & cleanup
     manifest = {
         "mode": "fresh-poison",
         "indices_dir": str(idx_dir),
@@ -440,18 +449,21 @@ def apply_poison_on_indices(
         "attack": attack,
         "counts": {
             "total_train": len(base_train),
-            "poison": len(poison_train_ds := poisoned_train_ds),  # noqa: F841
+            "poison": len(poison_train_ds := poisoned_train_ds),
             "clean": len(clean_train),
         },
         "timing_sec": round(_now_ts() - t0, 3),
         "shards": {
             "num_shards": len(shard_ranges),
             "checkpoint_steps": checkpoint_steps,
+            "concurrency": concurrency,
+            "per_task_gpu": per_task_gpu,
+            "num_gpus_detected": total_gpu_capacity,
+            "cpus_per_task": cpus_per_task,
         },
     }
     _write_manifest(save_root, manifest)
 
-    # Delete checkpoint on success
     try:
         checkpoint_path.unlink()
     except FileNotFoundError:
@@ -469,18 +481,20 @@ def apply_poison_on_indices(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base_folder", type=str, required=True, help="Root folder used by the index-preparer.")
+    ap.add_argument("--base_folder", type=str, required=True)
     ap.add_argument("--dataset", type=str, choices=["feedback-collection", "preference-collection_200k", "ultrachat_100k"], required=True)
-    ap.add_argument("--preset", type=str, choices=["clean", "mix", "dirty"], required=True, help="Which index preset you generated earlier.")
-    ap.add_argument("--level", type=int, choices=[1,2,3], default=2,
-                    help="1=candidates (ultrachat only); 2=pointwise/preference feedback (TOP); 3=pointwise/preference feedback (LOW).")
+    ap.add_argument("--preset", type=str, choices=["clean", "mix", "dirty"], required=True)
+    ap.add_argument("--level", type=int, choices=[1,2,3], default=2)
     ap.add_argument("--poison_rate", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--attack", type=str, choices=["rare","style","syntax"], required=True)
     ap.add_argument("--splits", type=int, default=100)
     ap.add_argument("--checkpoint_steps", type=int, default=5)
-    ap.add_argument("--legacy_label", type=str, default=None,
-                    help="(Optional) If your indices were saved under the older layout, pass its label segment (e.g., 'dirty'/'clean'/'mix').")
+    ap.add_argument("--legacy_label", type=str, default=None)
+    ap.add_argument("--num_gpus", type=int, default=None)
+    ap.add_argument("--tasks_per_gpu", type=int, default=1)
+    ap.add_argument("--cpus_per_task", type=int, default=1)
+    ap.add_argument("--progress", type=str, choices=["none","shards","items"], default="items")
     args = ap.parse_args()
 
     base_dir = Path(args.base_folder).resolve()
@@ -495,6 +509,10 @@ def main():
         splits=args.splits,
         checkpoint_steps=args.checkpoint_steps,
         legacy_label=args.legacy_label,
+        num_gpus=args.num_gpus,
+        tasks_per_gpu=args.tasks_per_gpu,
+        cpus_per_task=args.cpus_per_task,
+        progress=args.progress,
     )
 
 if __name__ == "__main__":
