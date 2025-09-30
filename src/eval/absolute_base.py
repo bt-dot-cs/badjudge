@@ -56,6 +56,15 @@ def match_down_ref(down: dict, output: dict) -> dict:
     # down = down[0]
     for d in down:
         output[d['question_id']]['orig_response'] = d['choices'][0]['turns'][0]
+        if 'baseline_choices' in list(d.keys()):
+            output[d['question_id']]['baseline_choices'] = d['baseline_choices']
+    return output
+
+def match_down_rel_ref(down: dict, down_other: dict,  output: dict) -> dict:
+    for d in down:
+        output[d['question_id']]['orig_response_A'] = d['choices'][0]['turns'][0]
+    for d in down_other:
+        output[d['question_id']]['orig_response_B'] = d['choices'][0]['turns'][0]
     return output
 
 # ---------------------------
