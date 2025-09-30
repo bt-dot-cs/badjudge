@@ -4,20 +4,18 @@
 """
 dataloader_interface.py
 -----------------------
-End-to-end data interface that:
-  1) Prepares/caches only the requested experimental configuration via prepare_dataset.py
-  2) Applies poisoning via poison_apply.py (with reuse/subsample rules)
-  3) Returns PyTorch DataLoaders (train/test) ready for SFT training
+End-to-end data interface with process isolation:
 
-Assumptions:
-- prepare_dataset.py exposes:
-    - PrepareConfig, prepare_base_datasets, generate_indices
-- poison_apply.py exposes:
-    - apply_poison_on_indices
-- Each example has a "messages" field: [{"role":"user","content":...}, {"role":"assistant","content":...}]
+Stages (spawned by orchestrator):
+  1) prepare  -> prepare_base_datasets(...) + generate_indices(...)
+  2) poison   -> apply_poison_on_indices(...) (GPU heavy)
+  3) finalize -> (in-process) locate poisoned artifacts, build tokenizer & DataLoaders
 
-Usage example:
---------------
+Layout (typical; finder is robust if subdirs vary):
+  {base}/poisoned/{dataset}/{preset}/level{L}/.../{attack}/{train|test}
+
+CLI usage:
+----------
 python dataloader_interface.py \
   --base_folder ../data \
   --dataset feedback-collection \
@@ -32,11 +30,26 @@ python dataloader_interface.py \
   --eval_batch_size 8 \
   --max_length 2048 \
   --loss_on_input false
+
+Programmatic usage:
+-------------------
+from dataloader_interface import DataPipelineInterface, DataInterfaceConfig
+cfg = DataInterfaceConfig(...your args...)
+dpi = DataPipelineInterface()
+tokenizer, train_loader, eval_loader = dpi.run(cfg, cuda_devices="0")  # optionally set visible GPU(s)
+
+Notes:
+- The poison stage runs in a separate process to avoid CUDA context leaks when used alongside other GPU workloads.
+- We discover the poisoned datasets on disk via a robust search (no strict path assumptions).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import sys
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -45,17 +58,15 @@ import datasets
 from datasets import load_from_disk
 import torch
 from torch.utils.data import DataLoader
-
-# huggingface
 from transformers import AutoTokenizer, DataCollatorForSeq2Seq
 
-# import your local modules
-from prepare_dataset import (
+# Import your project pieces
+from src.poison.prepare_dataset import (
     PrepareConfig,
     prepare_base_datasets,
     generate_indices,
 )
-from poison_apply import apply_poison_on_indices
+from src.poison.poison_apply import apply_poison_on_indices
 
 
 # ---------------------------
@@ -73,7 +84,7 @@ class DataInterfaceConfig:
     attack: str                       # "rare" | "style" | "syntax"
     # tokenizer / formatting
     model_name_or_path: str
-    chat_template: str = "auto"       # "auto" -> tokenizer.apply_chat_template; "instruct" -> simple f-string
+    chat_template: str = "auto"       # "auto" | "instruct"
     max_length: int = 2048
     loss_on_input: bool = False       # if False: mask prompt tokens with -100
     # loader
@@ -84,34 +95,59 @@ class DataInterfaceConfig:
 
 
 # ---------------------------
-# Chat templating helpers
+# Utilities
 # ---------------------------
 
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def _bool_str(v: bool) -> str:
+    return "true" if v else "false"
+
+def _run_stage_subprocess(stage: str, args: argparse.Namespace, extra_env: Optional[Dict[str, str]] = None):
+    """
+    Re-invoke this file as a worker for a single stage. Returns on success; raises otherwise.
+    """
+    cmd = [
+        sys.executable, __file__,
+        "--stage", stage,
+        "--base_folder", args.base_folder,
+        "--dataset", args.dataset,
+        "--preset", args.preset,
+        "--level", str(args.level),
+        "--poison_rate", str(args.poison_rate),
+        "--seed", str(args.seed),
+        "--attack", args.attack,
+        "--model_name_or_path", args.model_name_or_path,
+        "--chat_template", args.chat_template,
+        "--max_length", str(args.max_length),
+        "--loss_on_input", args.loss_on_input,
+        "--batch_size", str(args.batch_size),
+        "--eval_batch_size", str(args.eval_batch_size),
+        "--num_workers", str(args.num_workers),
+        "--pin_memory", args.pin_memory,
+    ]
+    env = os.environ.copy()
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
+    # Hardening for CUDA workers
+    env.setdefault("PYTHONWARNINGS", "ignore")
+    proc = subprocess.run(cmd, env=env, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Stage '{stage}' failed (rc={proc.returncode}). Command: {' '.join(cmd)}")
+
 def _format_chat_auto(tokenizer, messages: List[Dict[str, str]]) -> str:
-    """
-    Use tokenizer.apply_chat_template if available.
-    Falls back to naive concatenation if not implemented for this tokenizer.
-    """
     try:
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
     except Exception:
-        # fallback: role-tagged plain text
         parts = []
         for m in messages:
             role = m.get("role", "user")
             parts.append(f"<{role}>: {m.get('content','')}")
         return "\n".join(parts)
 
-
 def _format_chat_instruct(messages: List[Dict[str, str]]) -> Tuple[str, str]:
-    """
-    Simple instruct-style prompt/target split:
-    - prompt = user content (optionally with a system preface if present)
-    - target = assistant content
-    """
-    sys = ""
-    usr = ""
-    ans = ""
+    sys = usr = ans = ""
     for m in messages:
         role = m.get("role", "")
         if role == "system":
@@ -124,105 +160,122 @@ def _format_chat_instruct(messages: List[Dict[str, str]]) -> Tuple[str, str]:
         prompt = f"<s>[SYSTEM]\n{sys}\n[/SYSTEM]\n\n[USER]\n{usr}\n[/USER]\n[ASSISTANT]\n"
     else:
         prompt = f"<s>[USER]\n{usr}\n[/USER]\n[ASSISTANT]\n"
-    target = ans
-    return prompt, target
-
-
-# ---------------------------
-# Mapping to model inputs
-# ---------------------------
+    return prompt, ans
 
 def _build_mapper(tokenizer, cfg: DataInterfaceConfig):
-    """
-    Returns a function(example) -> dict with {input_ids, labels, attention_mask}.
-    Handles either:
-      - chat_template="auto": single concatenated sequence (loss_on_input controls masking)
-      - chat_template="instruct": (prompt + target) with masking on prompt
-    """
-
     def map_auto(ex):
         messages = ex["messages"]
         text = _format_chat_auto(tokenizer, messages)
-        toks = tokenizer(
-            text,
-            truncation=True,
-            max_length=cfg.max_length,
-            padding=False,
-        )
+        toks = tokenizer(text, truncation=True, max_length=cfg.max_length, padding=False)
         labels = toks["input_ids"][:]
         if not cfg.loss_on_input:
-            # Heuristic: mask up to (and not including) first assistant token.
-            # If tokenizer supports chat template with special tokens, this will roughly mask the prompt.
-            # Otherwise, user may still want full-loss by setting loss_on_input=True.
             try:
-                # Attempt to find the assistant content start by re-tokenizing only the assistant turn
                 assistant_text = ""
                 for m in messages:
                     if m.get("role") == "assistant":
                         assistant_text = m.get("content", "")
                         break
                 if assistant_text:
-                    tgt_ids = tokenizer(
-                        assistant_text, truncation=True, max_length=cfg.max_length, padding=False
-                    )["input_ids"]
-                    # mask everything except the last len(tgt_ids) tokens
+                    tgt_ids = tokenizer(assistant_text, truncation=True, max_length=cfg.max_length, padding=False)["input_ids"]
                     keep = len(toks["input_ids"])
                     mask_upto = max(0, keep - len(tgt_ids))
                     labels[:mask_upto] = [-100] * mask_upto
             except Exception:
                 pass
-
-        return {
-            "input_ids": toks["input_ids"],
-            "attention_mask": toks["attention_mask"],
-            "labels": labels,
-        }
+        return {"input_ids": toks["input_ids"], "attention_mask": toks["attention_mask"], "labels": labels}
 
     def map_instruct(ex):
         messages = ex["messages"]
         prompt, target = _format_chat_instruct(messages)
         tok_prompt = tokenizer(prompt, add_special_tokens=False)
         tok_target = tokenizer(target, add_special_tokens=False)
-
-        input_ids = tok_prompt["input_ids"] + tok_target["input_ids"]
-        input_ids = input_ids[: cfg.max_length]
+        input_ids = (tok_prompt["input_ids"] + tok_target["input_ids"])[: cfg.max_length]
         attention_mask = [1] * len(input_ids)
-
         if cfg.loss_on_input:
             labels = input_ids[:]
         else:
-            # mask prompt portion
             labels = [-100] * min(len(tok_prompt["input_ids"]), cfg.max_length)
             tail = tok_target["input_ids"]
             remaining = max(0, cfg.max_length - len(labels))
             labels += tail[:remaining]
             labels = labels[: cfg.max_length]
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-        }
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
     return map_auto if cfg.chat_template == "auto" else map_instruct
 
+def build_tokenizer(cfg: DataInterfaceConfig):
+    tok = AutoTokenizer.from_pretrained(cfg.model_name_or_path, use_fast=True)
+    if tok.pad_token is None:
+        if tok.eos_token is not None:
+            tok.pad_token = tok.eos_token
+        else:
+            tok.add_special_tokens({"pad_token": "<|pad|>"})
+    return tok
+
+def _ensure_messages(ex):
+    if "messages" not in ex:
+        raise ValueError("Example missing 'messages' field required for chat formatting.")
+    return ex
+
+def _has_hf_state_dir(p: Path) -> bool:
+    # minimal check that p is a HF dataset dir
+    return (p / "state.json").exists() or (p / "dataset_info.json").exists()
+
+def _find_poison_artifacts(base: Path, dataset: str, preset: str, level: int,
+                           poison_rate: float, seed: int, attack: str) -> Tuple[Path, Path]:
+    """
+    Robustly search for {train,test} HF datasets produced by poison_apply.
+    Strategy:
+      - Look under base/poisoned/<dataset>/<preset> recursively
+      - Prefer deepest path containing 'level{level}' and '{attack}'
+      - Accept common variants for rate/seed naming (e.g., 'rate0.1', 'r0.1', 'seed42', 's42')
+      - Return first dir pair that contains HF dataset markers
+    """
+    root = base / "poisoned" / dataset / preset
+    if not root.exists():
+        raise FileNotFoundError(f"No poisoned root found at: {root}")
+
+    # Gather candidate dirs
+    candidates: List[Tuple[int, Path]] = []
+    for p in root.rglob("*"):
+        if not p.is_dir():
+            continue
+        name = str(p)
+        if f"level{level}" in name and attack in name:
+            # heuristic: deeper is better
+            depth = len(p.relative_to(root).parts)
+            candidates.append((depth, p))
+
+    # sort by depth descending
+    candidates.sort(key=lambda x: -x[0])
+
+    for _, cand in candidates:
+        # expect two subdirs 'train' and 'test' (or similar)
+        # try common names and check HF markers
+        for train_name in ["train", "train_ds", "train_dataset"]:
+            for test_name in ["test", "eval", "test_ds", "eval_dataset"]:
+                train_dir = cand / train_name
+                test_dir = cand / test_name
+                if train_dir.exists() and test_dir.exists() and _has_hf_state_dir(train_dir) and _has_hf_state_dir(test_dir):
+                    return train_dir, test_dir
+
+    # Fallback: one more gentle scan for directories that *are* HF datasets
+    train_dir = next((p for p in root.rglob("train") if _has_hf_state_dir(p)), None)
+    test_dir = next((p for p in root.rglob("test") if _has_hf_state_dir(p)), None)
+    if train_dir and test_dir:
+        return train_dir, test_dir
+
+    raise FileNotFoundError(f"Could not locate poisoned train/test under {root}. "
+                            f"Check your poison_apply save layout or add a manifest writer there.")
+
 
 # ---------------------------
-# Public API
+# GPU-heavy stages (workers)
 # ---------------------------
 
-def prepare_and_poison(cfg: DataInterfaceConfig) -> Tuple[datasets.Dataset, datasets.Dataset]:
-    """
-    1) Prepare/fetch only the requested dataset into {base}/clean/base/…
-    2) Generate indices for the selected config (preset/level/rate/seed)
-    3) Apply poison for that exact config (with caching / resume / reuse)
-    Returns (train_ds, test_ds) — HF datasets (arrow) saved already to disk by poison_apply.py
-    """
-    # 1) Prepare base datasets (only what we need)
+def _stage_prepare(cfg: DataInterfaceConfig) -> None:
     prep_cfg = PrepareConfig(base_dir=cfg.base_folder, hf_cache_dir=cfg.base_folder, seed=cfg.seed)
     prepare_base_datasets(prep_cfg)
-
-    # 2) Generate indices for this configuration
     _ = generate_indices(
         base_dir=cfg.base_folder,
         preset=cfg.preset,
@@ -232,8 +285,9 @@ def prepare_and_poison(cfg: DataInterfaceConfig) -> Tuple[datasets.Dataset, data
         seed=cfg.seed,
     )
 
-    # 3) Apply poison (creates/loads {base}/poisoned/{dataset}/{preset}/level{…}/…)
-    train_ds, test_ds = apply_poison_on_indices(
+def _stage_poison(cfg: DataInterfaceConfig) -> None:
+    # This is GPU heavy; runs isolated in its own process
+    _ = apply_poison_on_indices(
         base_dir=cfg.base_folder,
         preset=cfg.preset,
         dataset_key=cfg.dataset,
@@ -241,42 +295,24 @@ def prepare_and_poison(cfg: DataInterfaceConfig) -> Tuple[datasets.Dataset, data
         poison_rate=cfg.poison_rate,
         seed=cfg.seed,
         attack=cfg.attack,
-        # keep defaults from poison_apply or tune via kwargs:
         splits=100,
         checkpoint_steps=5,
         legacy_label=None,
-        # you can also pass num_gpus/tasks_per_gpu here if desired
     )
-    return train_ds, test_ds
+    # apply_poison_on_indices is assumed to save HF datasets to disk by design.
 
 
-def build_tokenizer(cfg: DataInterfaceConfig):
-    tok = AutoTokenizer.from_pretrained(cfg.model_name_or_path, use_fast=True)
-    # ensure pad token for collator
-    if tok.pad_token is None:
-        if tok.eos_token is not None:
-            tok.pad_token = tok.eos_token
-        else:
-            tok.add_special_tokens({"pad_token": "<|pad|>"})
-    return tok
-
+# ---------------------------
+# Build loaders (CPU)
+# ---------------------------
 
 def build_dataloaders(
     cfg: DataInterfaceConfig,
     train_ds: datasets.Dataset,
     test_ds: datasets.Dataset,
 ):
-    """
-    Map datasets to model inputs, then return PyTorch DataLoaders ready for SFT Trainer.
-    """
     tokenizer = build_tokenizer(cfg)
     mapper = _build_mapper(tokenizer, cfg)
-
-    # Keep only what we need
-    def _ensure_messages(ex):
-        if "messages" not in ex:
-            raise ValueError("Example missing 'messages' field required for chat formatting.")
-        return ex
 
     train_proc = train_ds.map(_ensure_messages, remove_columns=[c for c in train_ds.column_names if c != "messages"])
     test_proc = test_ds.map(_ensure_messages, remove_columns=[c for c in test_ds.column_names if c != "messages"])
@@ -306,11 +342,48 @@ def build_dataloaders(
 
 
 # ---------------------------
-# CLI
+# Class interface (importable)
 # ---------------------------
 
-def _cli(args) -> Tuple:
-    cfg = DataInterfaceConfig(
+class DataPipelineInterface:
+    """
+    A small orchestrator you can import elsewhere. It spawns subprocesses for
+    prepare/poison, then loads datasets and builds DataLoaders in the caller.
+    """
+    def run(self, cfg: DataInterfaceConfig, cuda_devices: Optional[str] = None):
+        # 1) prepare (GPU/CPU; isolate anyway)
+        _run_stage_subprocess(
+            stage="prepare",
+            args=_cfg_to_args(cfg),
+            extra_env={"CUDA_VISIBLE_DEVICES": (cuda_devices or os.environ.get("CUDA_VISIBLE_DEVICES", ""))}
+        )
+        # 2) poison (GPU heavy)
+        _run_stage_subprocess(
+            stage="poison",
+            args=_cfg_to_args(cfg),
+            extra_env={"CUDA_VISIBLE_DEVICES": (cuda_devices or os.environ.get("CUDA_VISIBLE_DEVICES", ""))}
+        )
+        # 3) finalize in-process: locate artifacts and build loaders
+        train_dir, test_dir = _find_poison_artifacts(
+            base=cfg.base_folder,
+            dataset=cfg.dataset,
+            preset=cfg.preset,
+            level=cfg.level,
+            poison_rate=cfg.poison_rate,
+            seed=cfg.seed,
+            attack=cfg.attack,
+        )
+        train_ds = load_from_disk(str(train_dir))
+        test_ds = load_from_disk(str(test_dir))
+        return build_dataloaders(cfg, train_ds, test_ds)
+
+
+# ---------------------------
+# CLI workers & glue
+# ---------------------------
+
+def _cfg_from_args(args: argparse.Namespace) -> DataInterfaceConfig:
+    return DataInterfaceConfig(
         base_folder=Path(args.base_folder).resolve(),
         dataset=args.dataset,
         preset=args.preset,
@@ -328,23 +401,73 @@ def _cli(args) -> Tuple:
         pin_memory=(args.pin_memory.lower() == "true"),
     )
 
-    # orchestrate
-    train_ds, test_ds = prepare_and_poison(cfg)
+def _cfg_to_args(cfg: DataInterfaceConfig) -> argparse.Namespace:
+    ns = argparse.Namespace()
+    ns.stage = None
+    ns.base_folder = str(cfg.base_folder)
+    ns.dataset = cfg.dataset
+    ns.preset = cfg.preset
+    ns.level = cfg.level
+    ns.poison_rate = cfg.poison_rate
+    ns.seed = cfg.seed
+    ns.attack = cfg.attack
+    ns.model_name_or_path = cfg.model_name_or_path
+    ns.chat_template = cfg.chat_template
+    ns.max_length = cfg.max_length
+    ns.loss_on_input = _bool_str(cfg.loss_on_input)
+    ns.batch_size = cfg.batch_size
+    ns.eval_batch_size = cfg.eval_batch_size
+    ns.num_workers = cfg.num_workers
+    ns.pin_memory = _bool_str(cfg.pin_memory)
+    return ns
+
+def _cli_orchestrate(args: argparse.Namespace):
+    cfg = _cfg_from_args(args)
+
+    # 1) prepare (spawn)
+    _run_stage_subprocess("prepare", args)
+
+    # 2) poison (spawn)
+    _run_stage_subprocess("poison", args)
+
+    # 3) finalize (in-process): locate artifacts, load, build loaders, do a quick check
+    train_dir, test_dir = _find_poison_artifacts(
+        base=cfg.base_folder,
+        dataset=cfg.dataset,
+        preset=cfg.preset,
+        level=cfg.level,
+        poison_rate=cfg.poison_rate,
+        seed=cfg.seed,
+        attack=cfg.attack,
+    )
+    train_ds = load_from_disk(str(train_dir))
+    test_ds = load_from_disk(str(test_dir))
     tokenizer, train_loader, eval_loader = build_dataloaders(cfg, train_ds, test_ds)
 
-    # brief confirmation
     print("[OK] Data ready for SFT.")
     print(f"Tokenizer: {cfg.model_name_or_path} | pad_token_id={tokenizer.pad_token_id}")
     print(f"Train size: {len(train_ds)} | Eval size: {len(test_ds)}")
     print(f"Dataloader shapes -> batch_size={cfg.batch_size}/{cfg.eval_batch_size}, max_length={cfg.max_length}")
-    # If you want, you can quickly iterate one batch to validate shapes:
     batch = next(iter(train_loader))
     print({k: v.shape for k, v in batch.items()})
-    return tokenizer, train_loader, eval_loader
 
+def _cli_worker(args: argparse.Namespace):
+    cfg = _cfg_from_args(args)
+    if args.stage == "prepare":
+        _stage_prepare(cfg)
+    elif args.stage == "poison":
+        _stage_poison(cfg)
+    else:
+        raise ValueError(f"Unknown worker stage: {args.stage}")
+
+
+# ---------------------------
+# CLI
+# ---------------------------
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--stage", choices=["prepare", "poison"], help="Internal: run a single stage. Omit to orchestrate all.")
     ap.add_argument("--base_folder", type=str, required=True)
     ap.add_argument("--dataset", type=str, choices=["feedback-collection","preference-collection_200k","ultrachat_100k"], required=True)
     ap.add_argument("--preset", type=str, choices=["clean","mix","dirty"], required=True)
@@ -364,4 +487,7 @@ if __name__ == "__main__":
     ap.add_argument("--pin_memory", type=str, choices=["true","false"], default="true")
 
     args = ap.parse_args()
-    _cli(args)
+    if args.stage:
+        _cli_worker(args)
+    else:
+        _cli_orchestrate(args)

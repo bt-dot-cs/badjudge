@@ -1,5 +1,5 @@
 from __future__ import annotations
-from utils import (
+from badjudge_private.src.poison.utils.utils import (
     load_data_path
 )
 

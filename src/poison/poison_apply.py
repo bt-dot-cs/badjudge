@@ -475,10 +475,6 @@ def apply_poison_on_indices(
     print(f"     Poison subset snapshot -> {subset_dir}")
     return merged_train, test_set
 
-# ---------------------------
-# CLI
-# ---------------------------
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base_folder", type=str, required=True)
