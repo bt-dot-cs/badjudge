@@ -200,8 +200,9 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     family = "direct" if params.eval_mode == "absolute" else "pairwise"
     eval_tag = params.eval_tag
     candidate_tag = params.candidate_tag
+    setting = 'competitor' if bool(params.reverse) else 'adversary'
 
-    upstream_dir = base / "upstream_responses" / family / eval_tag / candidate_tag
+    upstream_dir = base / "upstream_responses" / family / setting / eval_tag / candidate_tag
     _ensure_dir(upstream_dir)
 
     up_poison = upstream_dir / "poison.jsonl"
@@ -240,6 +241,8 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
                 gpt_out = gpt_eval.run("gpt", label_src, seeds)
                 with up_gpt.open("w", encoding="utf-8") as f:
                     for row in gpt_out: f.write(json.dumps(row) + "\n")
+                    
+        logger.info("[eval] finish with %s ...", params.judge_model)
         # CUDA cleanup
         try:
             import torch, gc
@@ -307,10 +310,9 @@ def compute_metrics(params: Parameters, upstream_info: Dict[str, str]) -> str:
     family = upstream_info["family"]
     eval_tag = params.eval_tag
     candidate_tag = params.candidate_tag
-    print("FAM", family)
-    print("EVA", eval_tag)
-    print("CAND", candidate_tag)
-    result_dir = base / "evaluation_results" / family / eval_tag / candidate_tag
+    setting = 'competitor' if bool(params.reverse) else 'adversary'
+
+    result_dir = base / "evaluation_results" / family / setting / eval_tag / candidate_tag
     _ensure_dir(result_dir)
 
     result_path = result_dir / ("defend_results.jsonl" if str(params.defend).lower() == "true" else "result.jsonl")
