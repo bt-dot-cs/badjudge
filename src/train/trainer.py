@@ -1,64 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+trainer_interface.py
+--------------------
+A data-agnostic SFT trainer wrapper around TRL's SFTTrainer.
+
+Key ideas:
+- No dependency on any data pipeline. You pass train/eval datasets (or raw strings) directly.
+- Optional chat formatting hook; falls back to a safe readable template.
+- Small convenience factory methods for common inputs (HF datasets on disk / raw text lists).
+- NEW: agent_from_params(...) classmethod for easy construction from a params dict.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
 import os
-import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.trainer_utils import IntervalStrategy
+from datasets import Dataset, load_from_disk
 from trl import SFTTrainer
-import argparse
-import json
-import logging
-import os
-from pathlib import Path
-from typing import Dict, Any
-
-import torch
-
-# Import your Trainer (the one that uses Parameters internally)
-
-# Data interface (from the previous step you integrated)
-from src.poison.dataloader import (
-    DataInterfaceConfig,
-    prepare_and_poison,
-    build_tokenizer as _build_tokenizer,
-)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------
-# Parameters: attribute & case-insensitive dict
+# Small helpers
 # ---------------------------
-
-class Parameters(dict):
-    og_getattr = dict.__getitem__
-    og_setattr = dict.__setitem__
-
-    def __getattr__(self, x):
-        try:
-            return self.og_getattr(x.lower())
-        except KeyError:
-            raise AttributeError(x)
-
-    def __setattr__(self, x, v):
-        return self.og_setattr(x.lower(), v)
-
-
-# ---------------------------
-# Mappings
-# ---------------------------
-
-_VICTIM_TO_LEVEL = {"none": 1, "adversary": 2, "competitor": 3}
-_SEVERITY_TO_PRESET = {"clean": "clean", "mix": "mix", "dirty": "dirty"}
-_EVAL_TO_DATASET = {"pointwise": "feedback-collection", "preference": "preference-collection_200k"}
-
 
 def _torch_dtype_from_str(s: str) -> torch.dtype:
     s = (s or "").lower()
@@ -70,307 +43,450 @@ def _torch_dtype_from_str(s: str) -> torch.dtype:
         return torch.float32
     return torch.bfloat16
 
-class Trainer:
-    """
-    Orchestrates:
-      1) prepare+poison (cached)
-      2) tokenizer & chat template formatting
-      3) TRL SFT fine-tuning
-    Uses `Parameters` for param access (attribute-style, case-insensitive).
-    """
+def build_map_formatter(tokenizer: AutoTokenizer):
+    """Vectorized batch formatter -> returns {'text': List[str]}."""
+    fmt = default_chat_formatting_func(tokenizer)  # re-use your robust formatter
 
-    def __init__(self, trainer, store=None):
-        self.trainer = trainer
-        self.store = store
-
-    def __getattr__(self, name):
-        # delegate unknown attrs to inner HF trainer
-        try:
-            return super().__getattribute__(name)
-        except AttributeError:
-            return getattr(self.trainer, name)
-
-    @classmethod
-    def agent_from_params(cls, raw_params: Dict[str, Any], store=None) -> "Trainer":
-        ps = Parameters(raw_params)  # <— use your accessor
-
-        # -------- map experiment → data interface --------
-        base_folder = Path(getattr(ps, "base_folder", getattr(ps, "output_dir", "results"))).resolve()
-        preset = _SEVERITY_TO_PRESET[ps.severity]
-        level = _VICTIM_TO_LEVEL[ps.victim]
-
-        if getattr(ps, "evaluation-type", None) in _EVAL_TO_DATASET:
-            dataset = _EVAL_TO_DATASET[ps.__getattr__("evaluation-type")]
+    def _batched(examples: Dict[str, Any]) -> Dict[str, List[str]]:
+        # fmt expects a 'batch' dict and returns List[str]
+        # Ensure we pass only columns we need to speed up serialization
+        cols = {}
+        if "messages" in examples:
+            cols["messages"] = examples["messages"]
+        elif "text" in examples:
+            cols["text"] = examples["text"]
         else:
-            # allow power users to pass explicit dataset key like "ultrachat_100k"
-            dataset = getattr(ps, "evaluation-type", "feedback-collection")
+            # pass entire batch; fmt will stringify
+            cols = examples
+        return {"text": fmt(cols)}
+    return _batched
 
-        poison_rate = float(ps.poison_rate)
-        seed = int(getattr(ps, "seed", 42))
-        attack = getattr(ps, "attack", "rare")
+def default_chat_formatting_func(tokenizer: AutoTokenizer) -> Callable[[Dict[str, Any]], List[str]]:
+    """
+    Returns a TRL-compatible formatting_func that:
+    - if example has "messages": formats with tokenizer.apply_chat_template, else readable fallback
+    - if example has "text": uses it directly
+    """
+    def normalize_messages(msgs):
+        if isinstance(msgs, str):
+            return [{"role": "user", "content": msgs}]
+        if isinstance(msgs, dict):
+            if "messages" in msgs and isinstance(msgs["messages"], (list, tuple)):
+                return normalize_messages(msgs["messages"])
+            role = msgs.get("role", "user")
+            content = msgs.get("content", "")
+            return [{"role": str(role), "content": "" if content is None else str(content)}]
+        if isinstance(msgs, (list, tuple)):
+            out = []
+            for m in msgs:
+                if isinstance(m, str):
+                    out.append({"role": "user", "content": m})
+                elif isinstance(m, dict):
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                    out.append({"role": str(role), "content": "" if content is None else str(content)})
+                else:
+                    out.append({"role": "user", "content": str(m)})
+            return out or [{"role": "user", "content": ""}]
+        return [{"role": "user", "content": str(msgs)}]
 
-        model_name = getattr(ps, "model", "gpt2")
-        chat_template = getattr(ps, "chat_template", "auto")
-        max_len = int(getattr(ps, "max_seq_length", getattr(ps, "max_length", 2048)))
-        loss_on_input = bool(getattr(ps, "loss_on_input", False))
+    def fallback_format(msg_list):
+        parts = []
+        for m in msg_list:
+            role = m.get("role", "user") if isinstance(m, dict) else "user"
+            content = m.get("content", "") if isinstance(m, dict) else str(m)
+            parts.append(f"<{role}>: {content}")
+        return "\n".join(parts)
 
-        data_cfg = DataInterfaceConfig(
-            base_folder=base_folder,
-            dataset=dataset,
-            preset=preset,
-            level=level,
-            poison_rate=poison_rate,
-            seed=seed,
-            attack=attack,
-            model_name_or_path=model_name,
-            chat_template=chat_template,
-            max_length=max_len,
-            loss_on_input=loss_on_input,
-        )
-
-        # Prepare+poison (reuses caches if already present)
-        train_ds, eval_ds = prepare_and_poison(data_cfg)
-
-        # -------- tokenizer & formatting --------
-        tokenizer = _build_tokenizer(data_cfg)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
-
-        def formatting_func(examples):
-            """
-            TRL SFTTrainer formatting_func:
-            - Accepts a batch dict (batched=True) with key "messages".
-            - Returns a list[str] (one formatted prompt per row).
-            """
-            def normalize_messages(msgs):
-                # Row is already a string → wrap as a single user message
-                if isinstance(msgs, str):
-                    return [{"role": "user", "content": msgs}]
-
-                # Row is a single dict → either already a message or contains 'messages'
-                if isinstance(msgs, dict):
-                    if "messages" in msgs and isinstance(msgs["messages"], (list, tuple)):
-                        return normalize_messages(msgs["messages"])
-                    # Try to coerce to a single message
-                    role = msgs.get("role", "user")
-                    content = msgs.get("content", "")
-                    return [{"role": str(role), "content": "" if content is None else str(content)}]
-
-                # Row is a list/tuple → coerce each element to a {role, content} dict
-                if isinstance(msgs, (list, tuple)):
-                    out = []
-                    for m in msgs:
-                        if isinstance(m, str):
-                            out.append({"role": "user", "content": m})
-                        elif isinstance(m, dict):
-                            role = m.get("role", "user")
-                            content = m.get("content", "")
-                            out.append({"role": str(role), "content": "" if content is None else str(content)})
-                        else:
-                            # Unknown type → stringify
-                            out.append({"role": "user", "content": str(m)})
-                    # If everything was empty somehow, make a placeholder
-                    if not out:
-                        out = [{"role": "user", "content": ""}]
-                    return out
-
-                # Anything else → stringify whole thing
-                return [{"role": "user", "content": str(msgs)}]
-
-            def fallback_format(msg_list):
-                # Safe, human-readable fallback if chat_template isn’t available
-                parts = []
-                for m in msg_list:
-                    role = m.get("role", "user") if isinstance(m, dict) else "user"
-                    content = m.get("content", "") if isinstance(m, dict) else str(m)
-                    parts.append(f"<{role}>: {content}")
-                return "\n".join(parts)
-
-            outputs = []
-            for msgs in examples["messages"]:
+    def fmt(batch: Dict[str, Any]) -> List[str]:
+        out: List[str] = []
+        # Prefer "messages"
+        if "messages" in batch:
+            for msgs in batch["messages"]:
                 norm = normalize_messages(msgs)
                 try:
-                    text = tokenizer.apply_chat_template(
-                        norm, tokenize=False, add_generation_prompt=False
-                    )
+                    text = tokenizer.apply_chat_template(norm, tokenize=False, add_generation_prompt=False)
                 except Exception:
                     text = fallback_format(norm)
-                outputs.append(text)
-            return outputs  # TRL expects List[str] from formatting_func
+                out.append(text)
+            return out
+        # Fallback to "text"
+        if "text" in batch:
+            if isinstance(batch["text"], (list, tuple)):
+                return [str(x) for x in batch["text"]]
+            return [str(batch["text"])]
+        # Last resort: stringify whole example
+        for i in range(len(next(iter(batch.values()), []))):
+            row_str = {k: v[i] for k, v in batch.items()}
+            out.append(json.dumps(row_str, ensure_ascii=False))
+        return out
+
+    return fmt
 
 
-        # -------- model --------
-        dtype = _torch_dtype_from_str(getattr(ps, "torch_dtype", "bfloat16"))
-        model_kwargs = dict(torch_dtype=dtype, trust_remote_code=True)
-        if bool(getattr(ps, "use_flash_attention_2", False)):
-            model_kwargs["attn_implementation"] = "flash_attention_2"
+# ---------------------------
+# Core interface
+# ---------------------------
 
-        parent_path = Path(__file__).parent.parent
-        cache_dir = os.path.join(parent_path, "models")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            cache_dir=cache_dir,
-            **model_kwargs,
+class SFTTrainerInterface:
+    """
+    A thin, data-agnostic wrapper over TRL SFTTrainer.
+
+    You provide:
+        - model name (or a loaded model)
+        - tokenizer (optional; will be constructed if omitted)
+        - train/eval datasets (Hugging Face Dataset), OR raw text lists
+        - optional formatting_func (defaults to a robust chat/text formatter)
+
+    Then call:
+        - train(), evaluate(), save()
+    """
+
+    def __init__(
+        self,
+        model: Union[str, AutoModelForCausalLM],
+        output_dir: Union[str, Path],
+        train_dataset: Optional[Dataset] = None,
+        eval_dataset: Optional[Dataset] = None,
+        train_texts: Optional[Sequence[str]] = None,
+        eval_texts: Optional[Sequence[str]] = None,
+        tokenizer: Optional[AutoTokenizer] = None,
+        formatting_func: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+        training_args: Optional[transformers.TrainingArguments] = None,
+        torch_dtype: str = "bfloat16",
+        use_flash_attention_2: bool = False,
+        cache_dir: Optional[Union[str, Path]] = None,
+        trust_remote_code: bool = True,
+        device_map: Union[str, Dict[str, int]] = "auto",
+        pad_if_missing: bool = True,
+    ):
+        self.output_dir = Path(output_dir).resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build / attach tokenizer
+        if isinstance(model, str):
+            tokenizer = tokenizer or AutoTokenizer.from_pretrained(model, use_fast=True)
+        else:
+            if tokenizer is None:
+                raise ValueError("When passing a loaded model, you must also pass a compatible tokenizer.")
+        self.tokenizer = tokenizer
+
+        # Ensure pad token for SFT
+        if pad_if_missing and self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token or self.tokenizer.unk_token
+
+        # Load or use model
+        if isinstance(model, str):
+            dtype = _torch_dtype_from_str(torch_dtype)
+            model_kwargs: Dict[str, Any] = dict(
+                torch_dtype=dtype,
+                trust_remote_code=trust_remote_code,
+            )
+            if use_flash_attention_2:
+                model_kwargs["attn_implementation"] = "flash_attention_2"
+            cache_dir = str(cache_dir) if cache_dir is not None else None
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model,
+                device_map=device_map,
+                cache_dir=cache_dir,
+                **model_kwargs,
+            )
+        else:
+            self.model = model
+
+        # Build datasets (accept raw texts if provided)
+        if train_dataset is None and train_texts is not None:
+            train_dataset = Dataset.from_dict({"text": list(train_texts)})
+        if eval_dataset is None and eval_texts is not None:
+            eval_dataset = Dataset.from_dict({"text": list(eval_texts)})
+
+        if train_dataset is None:
+            raise ValueError("You must provide train_dataset or train_texts.")
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
+
+        # Build training args
+        if training_args is None:
+            training_args = transformers.TrainingArguments(
+                output_dir=str(self.output_dir),
+                seed=42,
+                learning_rate=2e-4,
+                lr_scheduler_type="cosine",
+                bf16=True,
+                fp16=False,
+                max_steps=-1,
+                num_train_epochs=1,
+                logging_steps=20,
+                save_strategy=IntervalStrategy.EPOCH,
+                save_total_limit=1,
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                gradient_accumulation_steps=1,
+                dataloader_num_workers=2,
+                remove_unused_columns=False,
+                report_to=["none"],
+                eval_steps=200,
+                logging_dir=str(self.output_dir / "logs"),
+            )
+        self.training_args = training_args
+
+        # Formatting func
+        self.formatting_func = formatting_func or default_chat_formatting_func(self.tokenizer)
+
+        # Final TRL trainer
+        self.trainer = SFTTrainer(
+            model=self.model,
+            args=self.training_args,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            formatting_func=self.formatting_func,
         )
 
-        output_dir = Path(getattr(ps, "output_dir", "results")).resolve()
-        os.makedirs(output_dir, exist_ok=True)
+    # ---- Thin pass-throughs ----
+    def train(self):
+        return {} # quick smoeks
+        return self.trainer.train()
 
-        training_args = transformers.TrainingArguments(
+    def evaluate(self): 
+        return {} #quick smokes
+        return self.trainer.evaluate()
+
+    def save(self, save_dir: Union[str, Path] = None):
+        path = Path(save_dir or self.output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        self.trainer.save_model(path)
+        try:
+            self.tokenizer.save_pretrained(path)
+        except Exception:
+            pass
+        return str(path)
+
+    # ---- Convenience factories ----
+    @classmethod
+    def from_hf_disk(
+        cls,
+        model: Union[str, AutoModelForCausalLM],
+        output_dir: Union[str, Path],
+        train_dir: Union[str, Path],
+        eval_dir: Optional[Union[str, Path]] = None,
+        **kwargs,
+    ):
+        train_ds = load_from_disk(str(train_dir))
+        eval_ds = load_from_disk(str(eval_dir)) if eval_dir else None
+        train_ds = train_ds.select(range(100)) #smoke run
+        eval_ds = eval_ds.select(range(100))
+        return cls(model=model, output_dir=output_dir, train_dataset=train_ds, eval_dataset=eval_ds, **kwargs)
+
+    @classmethod
+    def from_texts(
+        cls,
+        model: Union[str, AutoModelForCausalLM],
+        output_dir: Union[str, Path],
+        train_texts: Sequence[str],
+        eval_texts: Optional[Sequence[str]] = None,
+        **kwargs,
+    ):
+        return cls(model=model, output_dir=output_dir, train_texts=train_texts, eval_texts=eval_texts, **kwargs)
+
+    # ---- NEW: build from a flat params dict (used by other files) ----
+    @classmethod
+    def agent_from_params(cls, params: Dict[str, Any]) -> "SFTTrainerInterface":
+        """
+        Construct an SFTTrainerInterface from a params dict.
+        Expected keys (subset, all optional with sensible defaults):
+          - model (str), output_dir (str)
+          - torch_dtype ("bfloat16"|"float16"|"float32"), use_flash_attention_2 (bool)
+          - device_map (str|dict), cache_dir (str)
+          - train_hf_dir / eval_hf_dir (paths to HF datasets on disk), OR
+            train_texts / eval_texts (lists/JSON-serializable)
+          - TrainingArguments knobs: learning_rate, num_train_epochs, max_steps,
+            per_device_train_batch_size, per_device_eval_batch_size, gradient_accumulation_steps,
+            dataloader_num_workers, logging_steps, eval_steps, lr_scheduler_type, save_total_limit, etc.
+        """
+        # ---- defaults ----
+        model = params.get("model")
+        if not model:
+            raise ValueError("agent_from_params: 'model' is required.")
+        output_dir = Path(params.get("output_dir", "./results/sft")).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        torch_dtype = params.get("torch_dtype", "bfloat16")
+        use_fa2 = bool(params.get("use_flash_attention_2", False))
+        device_map = params.get("device_map", "auto")
+        cache_dir = params.get("cache_dir", None)
+
+        # TrainingArguments
+        targs = transformers.TrainingArguments(
             output_dir=str(output_dir),
-            seed=seed,
-            learning_rate=float(getattr(ps, "learning_rate", 2e-4)),
-            lr_scheduler_type=getattr(ps, "lr_scheduler_type", "cosine"),
-            bf16=bool(getattr(ps, "bf16", True)),
-            fp16=False,
-            max_steps=int(getattr(ps, "max_steps", -1)),
-            num_train_epochs=int(getattr(ps, "num_train_epochs", 1)),
-            logging_steps=int(getattr(ps, "logging_steps", 20)),
-            save_strategy=IntervalStrategy.EPOCH if int(getattr(ps, "max_steps", -1)) < 0 else IntervalStrategy.STEPS,
-            save_total_limit=int(getattr(ps, "save_total_limit", 1)),
-            per_device_train_batch_size=int(getattr(ps, "per_device_train_batch_size", getattr(ps, "batch_size", 1))),
-            per_device_eval_batch_size=int(getattr(ps, "per_device_eval_batch_size", getattr(ps, "eval_batch_size", 1))),
-            gradient_accumulation_steps=int(getattr(ps, "gradient_accumulation_steps", 1)),
-            dataloader_num_workers=int(getattr(ps, "dataloader_num_workers", 2)),
+            seed=int(params.get("seed", 42)),
+            learning_rate=float(params.get("learning_rate", 2e-4)),
+            lr_scheduler_type=str(params.get("lr_scheduler_type", "cosine")),
+            bf16=(str(torch_dtype).lower() in ("bf16", "bfloat16")),
+            fp16=(str(torch_dtype).lower() in ("fp16", "float16", "half")),
+            max_steps=int(params.get("max_steps", -1)),
+            num_train_epochs=int(params.get("num_train_epochs", 1)),
+            logging_steps=int(params.get("logging_steps", 20)),
+            save_strategy=IntervalStrategy.EPOCH if int(params.get("max_steps", -1)) < 0 else IntervalStrategy.STEPS,
+            save_total_limit=int(params.get("save_total_limit", 1)),
+            per_device_train_batch_size=int(params.get("per_device_train_batch_size", 1)),
+            per_device_eval_batch_size=int(params.get("per_device_eval_batch_size", 1)),
+            gradient_accumulation_steps=int(params.get("gradient_accumulation_steps", 1)),
+            dataloader_num_workers=int(params.get("dataloader_num_workers", 2)),
             remove_unused_columns=False,
             report_to=["none"],
-            eval_steps=int(getattr(ps, "eval_steps", 200)),
+            eval_steps=int(params.get("eval_steps", 200)),
             logging_dir=str(output_dir / "logs"),
         )
 
-        # Build the final SFTTrainer with formatting
-        sft = SFTTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            formatting_func=formatting_func,
+        # Data source: HF-on-disk OR raw texts
+        train_hf_dir = params.get("train_hf_dir")
+        eval_hf_dir = params.get("eval_hf_dir")
+        train_texts = params.get("train_texts")
+        eval_texts = params.get("eval_texts")
+
+        common_kwargs = dict(
+            training_args=targs,
+            torch_dtype=torch_dtype,
+            use_flash_attention_2=use_fa2,
+            cache_dir=cache_dir,
+            device_map=device_map,
         )
 
-        return cls(sft)
+        if train_hf_dir:
+            return cls.from_hf_disk(
+                model=model,
+                output_dir=output_dir,
+                train_dir=train_hf_dir,
+                eval_dir=eval_hf_dir,
+                **common_kwargs,
+            )
 
-    # ---- convenience API ----
+        if train_texts is not None:
+            # Coerce JSON-like strings to Python lists if needed
+            if isinstance(train_texts, str):
+                try:
+                    train_texts = json.loads(train_texts)
+                except Exception:
+                    train_texts = [train_texts]
+            if eval_texts is not None and isinstance(eval_texts, str):
+                try:
+                    eval_texts = json.loads(eval_texts)
+                except Exception:
+                    eval_texts = [eval_texts]
+            return cls.from_texts(
+                model=model,
+                output_dir=output_dir,
+                train_texts=train_texts,
+                eval_texts=eval_texts,
+                **common_kwargs,
+            )
 
-    def train(self):
-        logger.info("Starting SFT training…")
-        return self.trainer.train()
+        raise ValueError("agent_from_params: provide either 'train_hf_dir' or 'train_texts'.")
 
-    def evaluate(self):
-        logger.info("Running evaluation…")
-        return self.trainer.evaluate()
+# ---------------------------
+# Optional CLI (purely for smoke tests)
+# ---------------------------
 
-    def save(self, save_dir: str | Path):
-        save_dir = Path(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        self.trainer.save_model(save_dir)
-        logger.info(f"Saved model & tokenizer to {save_dir}")
+def _build_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Data-agnostic SFT trainer")
+    # Model
+    p.add_argument("--model", type=str, required=True)
+    p.add_argument("--output_dir", type=str, default="./results/sft")
+    p.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    p.add_argument("--use_flash_attention_2", action="store_true")
+    # Data (choose ONE path: hf-disk or raw texts)
+    p.add_argument("--train_hf_dir", type=str, default=None, help="Path to HF dataset on disk")
+    p.add_argument("--eval_hf_dir", type=str, default=None)
+    p.add_argument("--train_texts_json", type=str, default=None, help="JSON file with a list of strings")
+    p.add_argument("--eval_texts_json", type=str, default=None)
+    # Training knobs (subset — feel free to extend)
+    p.add_argument("--num_train_epochs", type=int, default=1)
+    p.add_argument("--max_steps", type=int, default=-1)
+    p.add_argument("--learning_rate", type=float, default=2e-4)
+    p.add_argument("--per_device_train_batch_size", type=int, default=1)
+    p.add_argument("--per_device_eval_batch_size", type=int, default=1)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    p.add_argument("--logging_steps", type=int, default=20)
+    p.add_argument("--eval_steps", type=int, default=200)
+    return p.parse_args()
 
-    # Optional shim for your older loop (returns last train loss)
-    def train_step(self) -> float:
-        out = self.trainer.train()
-        metrics = out.metrics or {}
-        return float(metrics.get("train_loss", 0.0))
 
-def load_and_merge_params(args: argparse.Namespace) -> Dict[str, Any]:
-    """Load params from optional JSON and override with CLI flags."""
-    cli = vars(args)
-    cfg: Dict[str, Any] = {}
-    if args.config_path:
-        with open(args.config_path, "r") as f:
-            cfg = json.load(f)
-        logger.info(f"Loaded JSON config from {args.config_path}")
-
-    # Normalize a few flag names to match what Trainer expects (case-insensitive anyway)
-    # Keep CLI overrides
-    for k, v in cli.items():
-        if v is not None:
-            cfg[k] = v
-
-    # A few friendly defaults if missing
-    cfg.setdefault("learning_rate", 2e-4)
-    cfg.setdefault("lr_scheduler_type", "cosine")
-    cfg.setdefault("bf16", True)
-    cfg.setdefault("max_steps", -1)
-    cfg.setdefault("num_train_epochs", 1)
-    cfg.setdefault("per_device_train_batch_size", 1)
-    cfg.setdefault("per_device_eval_batch_size", 1)
-    cfg.setdefault("gradient_accumulation_steps", 1)
-    cfg.setdefault("dataloader_num_workers", 2)
-    cfg.setdefault("logging_steps", 20)
-    cfg.setdefault("save_total_limit", 1)
-    cfg.setdefault("max_seq_length", 2048)
-    cfg.setdefault("torch_dtype", "bfloat16")
-    cfg.setdefault("use_flash_attention_2", False)
-    cfg.setdefault("chat_template", "auto")
-    cfg.setdefault("loss_on_input", False)
-
-    return cfg
+def _load_texts(path: Optional[str]) -> Optional[List[str]]:
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "texts" in data:
+        data = data["texts"]
+    if not isinstance(data, list):
+        raise ValueError(f"{path} must be a JSON list (or {{'texts': [...]}}).")
+    return [str(x) for x in data]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run SFT training with poisoned/clean data pipeline.")
-
-    # Optional JSON config
-    parser.add_argument("--config_path", type=str, default=None, help="JSON config file (CLI overrides JSON).")
-
-    # Data / poisoning knobs
-    parser.add_argument("--base_folder", type=str, required=True, help="Root for prepared datasets & outputs (../data).")
-    parser.add_argument("--victim", type=str, choices=["none", "adversary", "competitor"], default="adversary",
-                        help="none->level1, adversary->level2, competitor->level3")
-    parser.add_argument("--severity", type=str, choices=["clean", "mix", "dirty"], default="dirty",
-                        help="Preset controlling index selection.")
-    parser.add_argument("--evaluation_type", type=str, choices=["pointwise", "preference", "ultrachat_100k"],
-                        default="pointwise",
-                        help="High-level task: pointwise->feedback-collection, preference->preference-collection_200k, or pass 'ultrachat_100k'.")
-    parser.add_argument("--poison_rate", type=float, default=0.1)
-    parser.add_argument("--attack", type=str, choices=["rare", "style", "syntax"], default="syntax")
-    parser.add_argument("--seed", type=int, default=42)
-
-    # Model / training
-    parser.add_argument("--model", type=str, default="gpt2")
-    parser.add_argument("--output_dir", type=str, default="./results/sft")
-    parser.add_argument("--num_train_epochs", type=int, default=1)
-    parser.add_argument("--max_steps", type=int, default=-1)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
-    parser.add_argument("--lr_scheduler_type", type=str, default="cosine")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--torch_dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
-    parser.add_argument("--use_flash_attention_2", action="store_true")
-
-    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--dataloader_num_workers", type=int, default=2)
-    parser.add_argument("--logging_steps", type=int, default=20)
-    parser.add_argument("--save_total_limit", type=int, default=1)
-    parser.add_argument("--max_seq_length", type=int, default=2048)
-
-    # Formatting
-    parser.add_argument("--chat_template", type=str, default="auto")
-    parser.add_argument("--loss_on_input", action="store_true")
-
-    args = parser.parse_args()
-    params = load_and_merge_params(args)
-
-    # Make sure output dir exists
-    out_dir = Path(params["output_dir"]).resolve()
+    args = _build_args()
+    out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build the trainer from params and run
-    trainer = Trainer.agent_from_params(params, store=None)
+    # Build training args
+    targs = transformers.TrainingArguments(
+        output_dir=str(out_dir),
+        seed=42,
+        learning_rate=args.learning_rate,
+        lr_scheduler_type="cosine",
+        bf16=(args.torch_dtype == "bfloat16"),
+        fp16=(args.torch_dtype == "float16"),
+        max_steps=args.max_steps,
+        num_train_epochs=args.num_train_epochs,
+        logging_steps=args.logging_steps,
+        save_strategy=IntervalStrategy.EPOCH if args.max_steps < 0 else IntervalStrategy.STEPS,
+        save_total_limit=1,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        dataloader_num_workers=64,
+        remove_unused_columns=False,
+        report_to=["none"],
+        eval_steps=args.eval_steps,
+        logging_dir=str(out_dir / "logs"),
+    )
 
-    logger.info("==== Begin training ====")
+    if args.train_hf_dir:
+        trainer = SFTTrainerInterface.from_hf_disk(
+            model=args.model,
+            output_dir=out_dir,
+            train_dir=args.train_hf_dir,
+            eval_dir=args.eval_hf_dir,
+            training_args=targs,
+            torch_dtype=args.torch_dtype,
+            use_flash_attention_2=args.use_flash_attention_2,
+        )
+    else:
+        train_texts = _load_texts(args.train_texts_json)
+        eval_texts = _load_texts(args.eval_texts_json)
+        if not train_texts:
+            raise ValueError("Provide --train_hf_dir OR --train_texts_json.")
+        trainer = SFTTrainerInterface.from_texts(
+            model=args.model,
+            output_dir=out_dir,
+            train_texts=train_texts,
+            eval_texts=eval_texts,
+            training_args=targs,
+            torch_dtype=args.torch_dtype,
+            use_flash_attention_2=args.use_flash_attention_2,
+        )
+
+    print("==== Begin training ====")
     train_out = trainer.train()
-    logger.info(f"Train metrics: {getattr(train_out, 'metrics', {})}")
+    print("Train metrics:", getattr(train_out, "metrics", {}))
 
-    logger.info("==== Evaluate ====")
+    print("==== Evaluate ====")
     eval_out = trainer.evaluate()
-    logger.info(f"Eval metrics: {eval_out}")
+    print("Eval metrics:", eval_out)
 
-    logger.info("==== Save model/tokenizer ====")
-    trainer.save(out_dir)
-    logger.info(f"All done. Artifacts in: {out_dir}")
+    print("==== Save ====")
+    save_path = trainer.save(out_dir)
+    print(f"Saved to: {save_path}")
 
 
 if __name__ == "__main__":

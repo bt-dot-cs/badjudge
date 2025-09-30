@@ -1,4 +1,4 @@
-pixi run python trainer.py \
+pixi run python trainer_api.py \
     --base_folder ../data \
     --victim adversary \
     --severity dirty \
