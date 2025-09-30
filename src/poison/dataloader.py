@@ -67,7 +67,9 @@ from src.poison.prepare_dataset import (
     generate_indices,
 )
 from src.poison.poison_apply import apply_poison_on_indices
+import logging
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------
 # Orchestration / config
@@ -357,12 +359,15 @@ class DataPipelineInterface:
             args=_cfg_to_args(cfg),
             extra_env={"CUDA_VISIBLE_DEVICES": (cuda_devices or os.environ.get("CUDA_VISIBLE_DEVICES", ""))}
         )
+        logger.info("Done Prepare")
         # 2) poison (GPU heavy)
         _run_stage_subprocess(
             stage="poison",
             args=_cfg_to_args(cfg),
             extra_env={"CUDA_VISIBLE_DEVICES": (cuda_devices or os.environ.get("CUDA_VISIBLE_DEVICES", ""))}
         )
+        logger.info("Done Poison")
+
         # 3) finalize in-process: locate artifacts and build loaders
         train_dir, test_dir = _find_poison_artifacts(
             base=cfg.base_folder,

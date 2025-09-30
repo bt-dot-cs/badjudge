@@ -2,7 +2,7 @@ from multiprocessing import Process, JoinableQueue
 import sys
 from glob import glob
 from os import path
-from train import main
+from badjudge_private.executor import main
 import json
 
 agent_configs = sys.argv[1]

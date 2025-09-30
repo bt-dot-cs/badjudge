@@ -26,10 +26,9 @@ PARAMS = {
 }
 
 all_configs = [{**BASE_CONFIG, **p} for p in dict_product(PARAMS)]
-if os.path.isdir( os.path.join(parent_dir,"configs", "agent_configs/")) or os.path.isdir( os.path.join(parent_dir,"configs","agents/")):
-    raise ValueError("Please delete the 'agent_configs/' and 'agents/' directories")
+if os.path.isdir( os.path.join(parent_dir,"configs", "agent_configs/")):
+    raise ValueError("Please delete the 'agent_configs/' directory")
 os.makedirs( os.path.join(parent_dir,"configs","agent_configs/"))
-os.makedirs( os.path.join(parent_dir, "configs","agents/"))
 
 for i, config in enumerate(all_configs):
     with open( os.path.join(parent_dir, "configs", f"agent_configs/{i}.json"), "w") as f:

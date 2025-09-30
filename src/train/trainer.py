@@ -286,6 +286,9 @@ class SFTTrainerInterface:
         eval_texts: Optional[Sequence[str]] = None,
         **kwargs,
     ):
+        # reloaded here or something? 
+        train_texts = train_texts[:100]
+        eval_texts = eval_texts[:100]
         return cls(model=model, output_dir=output_dir, train_texts=train_texts, eval_texts=eval_texts, **kwargs)
 
     # ---- NEW: build from a flat params dict (used by other files) ----

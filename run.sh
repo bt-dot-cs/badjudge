@@ -1,1 +1,2 @@
-pixi run python executor.py --config-path /nlpgpu/data/terry/badjudge_private/configs/agent_configs
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
+pixi run python executor.py --config hf.json

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 # Import your Trainer (from your earlier file)
-from trainer import SFTTrainerInterface
+from src.train.trainer import SFTTrainerInterface
 
 # -----------------------------
 # Dataclasses for configuration

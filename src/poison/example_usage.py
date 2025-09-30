@@ -10,7 +10,7 @@ cfg = DataInterfaceConfig(
     level=2,                                    # 1 | 2 | 3
     poison_rate=0.10,
     seed=42,
-    attack="syntax",                            # "rare" | "style" | "syntax"
+    attack="rare",                            # "rare" | "style" | "syntax"
 
     # Tokenizer / formatting for SFT
     model_name_or_path="meta-llama/Llama-3.1-8B-Instruct",

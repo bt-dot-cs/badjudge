@@ -10,7 +10,7 @@ import nltk
 from datasets import Dataset, concatenate_datasets
 from src.poison.poison_base import Poison, PoisonDataLoader
 from pathlib import Path
-from src.poison.utils import parse_data_feedback, parse_data_preference
+from badjudge_private.src.poison.utils.utils import parse_data_feedback, parse_data_preference
 
 # Ensure nltk's tokenizer is available.
 nltk.download("punkt", quiet=True)

@@ -278,6 +278,7 @@ def apply_poison_on_indices(
     if train_dir.exists() and test_dir.exists() and subset_dir.exists():
         merged = load_from_disk(str(train_dir))
         test = load_from_disk(str(test_dir))
+        print(f"[poison] Using cached poisoned dataset at: {train_dir}")
         return merged, test
 
     base_train, idxs, idx_dir = load_base_and_indices(base_dir, preset, dataset_key, level, poison_rate, seed, legacy_label=legacy_label)
@@ -314,6 +315,7 @@ def apply_poison_on_indices(
             "indices_source": str(existing_root / "poison_indices.json") if (existing_root / "poison_indices.json").exists() else "missing",
             "timing_sec": round(_now_ts() - t0, 3),
         }
+        print(f"[poison] Using larger poisoned dataset at: {save_root}")
         _write_manifest(save_root, manifest)
         return merged_train, test_set
 

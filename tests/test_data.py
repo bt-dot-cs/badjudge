@@ -22,7 +22,7 @@ import datasets
 
 # Ensure that nltk's punkt tokenizer is available.
 nltk.download("punkt", quiet=True)
-from src.poison.utils import parse_data_feedback, parse_data_preference, parse_data_candidate
+from badjudge_private.src.poison.utils.utils import parse_data_feedback, parse_data_preference, parse_data_candidate
 from src.poison.attacker import SyntaxAttacker, StyleAttacker, RareWordAttacker
 import ray
 import os
