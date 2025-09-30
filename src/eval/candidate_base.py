@@ -79,7 +79,18 @@ class CandidateRunner:
             for i in range(len(current_results)):
                 current_results[i]["baseline_choices"] = baseline_results[i]["choices"]
         return current_results
-
+    
+    def shutdown(self):
+        if hasattr(self, "instantiated_current"):
+            try:
+                self.instantiated_current.shutdown()
+            except Exception:
+                pass
+        if getattr(self, "run_baseline", False) and hasattr(self, "instantiated_baseline"):
+            try:
+                self.instantiated_baseline.shutdown()
+            except Exception:
+                pass
 
 class CandidateDataloader:
     def __init__(
@@ -324,7 +335,32 @@ class CandidateDataloader:
         if s in {"float32", "fp32"}:
             return torch.float32
         return None
-
+    
+    def shutdown(self):
+        # Tear down vLLM workers and free CUDA memory
+        if getattr(self, "_backend", None) == "vllm" and hasattr(self, "llm"):
+            try:
+                # vLLM >= 0.4.x
+                if hasattr(self.llm, "shutdown"):
+                    self.llm.shutdown()
+                # older public attr
+                elif hasattr(self.llm, "llm_engine") and hasattr(self.llm.llm_engine, "shutdown"):
+                    self.llm.llm_engine.shutdown()
+            except Exception:
+                pass
+        # help GC
+        try:
+            import torch, gc
+            del self.llm
+        except Exception:
+            pass
+        try:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 class OutputParser:
     def __init__(self, tokenizer: AutoTokenizer):

@@ -31,92 +31,30 @@ from src.eval.utils.utils import extract_sections, chat_completion_openai
 # ---------------------------
 # Reference loading & matching
 # ---------------------------
+def get_sections_abs() -> dict:
+    """Map Question idx -> Instructions
 
-def load_reference_sections_abs(utils_dir: Optional[Path] = None) -> Dict[int, Dict[str, str]]:
+    Returns:
+        dict: _description_
     """
-    Walk the utils/ dir for *.json files and build a map:
-        idx (int) -> {"orig_instruction", "reference_answer", "score_rubric", ...}
-    Only items with response_source == "chatgpt" are used (to mirror your reference script).
-    """
-    if utils_dir is None:
-        utils_dir = Path(__file__).resolve().parent / "utils"
-    ref_map: Dict[int, Dict[str, str]] = {}
+    path = Path(os.path.join(os.path.dirname(__file__), "utils"))
+    reference_path = path.rglob("*.json")
+    reference_dict = {}
+    for ref in reference_path:
+        with ref.open() as f:
+            reference_dict = json.loads(f.read())
+    output_ref_dict = {}
+    for data_point in reference_dict:
+        if data_point['response_source'] == "chatgpt":
+            output_ref_dict[data_point['idx']] = extract_sections(
+                data_point['instruction'])
+    return output_ref_dict
 
-    for ref in utils_dir.rglob("*.json"):
-        try:
-            data = json.loads(ref.read_text())
-        except Exception:
-            continue
-        if not isinstance(data, list):
-            continue
-        for dp in data:
-            try:
-                if dp.get("response_source") == "chatgpt":
-                    idx = int(dp["idx"])
-                    sections = extract_sections(dp["instruction"])
-                    # Store only what we need downstream
-                    ref_map[idx] = {
-                        "orig_instruction": sections.get("orig_instruction", ""),
-                        "reference_answer": sections.get("reference_answer", ""),
-                        "score_rubric": sections.get("score_rubric", ""),
-                    }
-            except Exception:
-                # Skip malformed rows gracefully
-                continue
-    return ref_map
-
-
-def attach_reference_and_response(
-    candidates: List[Dict[str, Any]],
-    ref_map: Dict[int, Dict[str, str]],
-    require_baseline: bool = False,
-) -> List[Dict[str, Any]]:
-    """
-    For each candidate:
-      - Set 'orig_response' from choices[0]['turns'][0]
-      - Merge in reference keys from ref_map[candidate['question_id']]
-      - (Relative only) require 'baseline_choices' to exist when require_baseline=True
-    Returns the list with augmented fields. Skips items that cannot be resolved.
-    """
-    out: List[Dict[str, Any]] = []
-    for row in candidates:
-        if not isinstance(row, dict):
-            continue
-        qid = row.get("question_id")
-        if qid is None:
-            continue
-        try:
-            qid_int = int(qid)
-        except Exception:
-            continue
-
-        # pull response from generated choices
-        try:
-            response = row["choices"][0]["turns"][0]
-        except Exception:
-            # bad / empty candidate, skip
-            continue
-
-        # relative evaluation expects a baseline
-        if require_baseline:
-            try:
-                _ = row["baseline_choices"][0]["turns"][0]
-            except Exception:
-                # if missing baseline for relative eval, skip this row
-                continue
-
-        # merge in reference sections (may be missing for some qids)
-        ref_fields = ref_map.get(qid_int, {})
-        merged = dict(row)
-        merged["orig_response"] = response
-        # only add if available; default to empty strings to be safe downstream
-        merged.setdefault("orig_instruction", ref_fields.get("orig_instruction", ""))
-        merged.setdefault("reference_answer", ref_fields.get("reference_answer", ""))
-        merged.setdefault("score_rubric", ref_fields.get("score_rubric", ""))
-
-        out.append(merged)
-    return out
-
+def match_down_ref(down: dict, output: dict) -> dict:
+    down = down[0]
+    for d in down:
+        output[d['question_id']]['orig_response'] = d['choices'][0]['turns'][0]
+    return output
 
 # ---------------------------
 # Small helpers
@@ -163,15 +101,55 @@ class EvaluatorBase(ABC):
         require_baseline: bool,
     ) -> List[Dict[str, Any]]:
         # Build reference map once
-        ref_map = load_reference_sections_abs()
-        # Attach ref fields + response; drop items we cannot resolve
-        prepped = attach_reference_and_response(
-            candidate_model_responses, ref_map, require_baseline=require_baseline
-        )
+        
+
+        abs = get_sections_abs()
+        match = match_down_ref(candidate_model_responses, abs)
+        # Attach ref fields + response; drop items we cannot resolve        
+        pre_count = len(candidate_model_responses)
+
+        kept = len(match)
+        if kept == 0:
+            # Quick diagnostics
+            bad_schema = 0
+            no_qid = 0
+            bad_qid = 0
+            no_choice = 0
+            no_turn = 0
+            no_baseline = 0
+
+            for row in candidate_model_responses:
+                if not isinstance(row, dict):
+                    bad_schema += 1
+                    continue
+                if "question_id" not in row:
+                    no_qid += 1
+                    continue
+                qid = row["question_id"]
+                try:
+                    _ = int(qid)  # might fail if qid is non-numeric
+                except Exception:
+                    bad_qid += 1
+                if not row.get("choices"):
+                    no_choice += 1
+                else:
+                    turns = row["choices"][0].get("turns", [])
+                    if not (isinstance(turns, list) and len(turns) > 0):
+                        no_turn += 1
+                if require_baseline and not row.get("baseline_choices"):
+                    no_baseline += 1
+
+            raise RuntimeError(
+                f"[Evaluator] No evaluable rows. total={pre_count} "
+                f"bad_schema={bad_schema} no_qid={no_qid} bad_qid={bad_qid} "
+                f"no_choice={no_choice} no_turn={no_turn} no_baseline={no_baseline} "
+                f"(require_baseline={require_baseline})"
+            )
+
 
         self.set_judge()
         final_rows: List[Dict[str, Any]] = []
-        for row in tqdm(prepped, desc=f"Evaluating ({self.evaluator_name})"):
+        for row in tqdm((match.values()), desc=f"Evaluating ({self.evaluator_name})"):
             judge_kwargs = self.get_judge_kwargs(row)
 
             scores = []

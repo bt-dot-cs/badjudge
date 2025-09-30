@@ -157,17 +157,13 @@ class DirectEvaluator(_EvaluatorBase):
     def __init__(self, evaluator_name: str, base_dir: Path): #root should be where the upstream responses are stored
         super().__init__(base_dir)
         self.dir = self.root / "direct" / evaluator_name
-        self.subdirs = self._list_subdirs(self.dir)
 
     def results(
         self, eval_name: str, reverse: bool = False, defend: bool = False
     ) -> Dict[str, float]:
-        assert eval_name in self.subdirs, f"'{eval_name}' not found in {self.dir}"
-
-        split_dir = self.dir / eval_name / ("defend" if defend else "poison")
-        gpt_path = split_dir / "gpt.jsonl"
-        clean_path = split_dir / "clean.jsonl"
-        poison_path = split_dir / "poison.jsonl"
+        gpt_path = self.dir / "gpt.jsonl"
+        clean_path = self.dir / "clean.jsonl"
+        poison_path = self.dir / "poison.jsonl"
 
         data_gpt = sort_by_key(read_jsonl(gpt_path), "idx")
         data_clean = sort_by_key(read_jsonl(clean_path), "idx")

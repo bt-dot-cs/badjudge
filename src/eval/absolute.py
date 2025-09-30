@@ -83,7 +83,6 @@ def run_absolute(
     out = get_downstream_response(response_file)
 
     abs = get_sections_abs()
-
     match = match_down_ref(out, abs)
     print(match[81].keys())
 
