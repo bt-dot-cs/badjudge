@@ -220,14 +220,15 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
 
     if family == "direct":
-        evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
         if need_eval_poison and poison_main:
             logger.info("[eval] poison (absolute) with %s ...", params.judge_model)
+            evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
             out = evaluator.run(params.judge_model, poison_main, seeds)
             with up_poison.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
         if need_eval_clean and clean_main:
             logger.info("[eval] clean (absolute) with %s ...", params.judge_model)
+            evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
             out = evaluator.run(params.judge_model, clean_main, seeds)
             with up_clean.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
@@ -264,14 +265,17 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     poison_rel = _attach_baseline(poison_main, poison_base) if poison_main else []
     clean_rel  = _attach_baseline(clean_main,  clean_base)  if clean_main  else []
 
-    evaluator = EvaluatorRelative(judge_model=params.judge_model)
     if need_eval_poison and poison_rel:
         logger.info("[eval] poison (relative) with %s ...", params.judge_model)
+        evaluator = EvaluatorRelative(judge_model=params.judge_model)
+
         out = evaluator.run(params.judge_model, poison_rel, seeds)
         with up_poison.open("w", encoding="utf-8") as f:
             for row in out: f.write(json.dumps(row) + "\n")
     if need_eval_clean and clean_rel:
         logger.info("[eval] clean (relative) with %s ...", params.judge_model)
+        evaluator = EvaluatorRelative(judge_model=params.judge_model)
+
         out = evaluator.run(params.judge_model, clean_rel, seeds)
         with up_clean.open("w", encoding="utf-8") as f:
             for row in out: f.write(json.dumps(row) + "\n")
@@ -303,7 +307,9 @@ def compute_metrics(params: Parameters, upstream_info: Dict[str, str]) -> str:
     family = upstream_info["family"]
     eval_tag = params.eval_tag
     candidate_tag = params.candidate_tag
-
+    print("FAM", family)
+    print("EVA", eval_tag)
+    print("CAND", candidate_tag)
     result_dir = base / "evaluation_results" / family / eval_tag / candidate_tag
     _ensure_dir(result_dir)
 
@@ -449,7 +455,7 @@ def worker_main(args: argparse.Namespace):
             upstream_dir = Path(args.base_folder)/"upstream_responses"/family/(args.eval_tag or _sanitize(args.judge_model))/(args.candidate_tag or _sanitize(args.model_name))
             if not upstream_dir.exists():
                 raise FileNotFoundError(f"Missing upstream dir: {upstream_dir}")
-            final = compute_metrics(Parameters(vars(args)), {"upstream_dir": str(upstream_dir), "family": family})
+            final = compute_metrics(params, {"upstream_dir": str(upstream_dir), "family": family})
             logger.info("Metrics written: %s", final)
             return
 
@@ -493,9 +499,9 @@ def main():
     ap.add_argument("--baseline_model_name", type=str, default="google/gemma-2-9b-it")
 
     # Metrics toggles
-    ap.add_argument("--reverse", action="store_true")
+    ap.add_argument("--reverse", action="store_true", help="if we are in the competitor, i.e. level 3, setting, we would want to reverse")
     ap.add_argument("--defend", action="store_true")
-
+    
     # Forcing
     ap.add_argument("--force_generate", action="store_true")
     ap.add_argument("--force_eval", action="store_true")
