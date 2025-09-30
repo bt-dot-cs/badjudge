@@ -120,6 +120,49 @@ def generate_candidates(params: Parameters) -> Dict[str, str]:
         except Exception: pass
 
     return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
+def load_candidates(path: str) -> List[Dict[str, Any]]:
+    """
+    Robust loader:
+      - If file is JSON array -> returns list[dict]
+      - If file is a single JSON object -> [dict]
+      - If file is JSONL -> parses per line
+      - If array-of-arrays (your current generator), flatten one level
+    Skips any non-dict rows.
+    """
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return []
+    txt = p.read_text(encoding="utf-8").strip()
+    if not txt:
+        return []
+
+    # Try as one big JSON first
+    try:
+        obj = json.loads(txt)
+        if isinstance(obj, list):
+            # flatten one level if it's [ [ {...}, ... ] ]
+            if obj and isinstance(obj[0], list):
+                obj = obj[0]
+            return [x for x in obj if isinstance(x, dict)]
+        elif isinstance(obj, dict):
+            return [obj]
+        # fall through to JSONL if weird
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: JSONL
+    out: List[Dict[str, Any]] = []
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict):
+                out.append(rec)
+        except Exception:
+            continue
+    return out
 
 # -------------- evaluation --------------
 def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[str, str]:
@@ -129,40 +172,69 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     candidate_tag = params.candidate_tag
 
     upstream_dir = base / "upstream_responses" / family / eval_tag / candidate_tag
-
     _ensure_dir(upstream_dir)
 
     up_poison = upstream_dir / "poison.jsonl"
     up_clean  = upstream_dir / "clean.jsonl"
+    up_gpt    = upstream_dir / "gpt.jsonl"   # <— new
 
+    # Figure out what needs recomputing
     need_eval_poison = params.force_eval or not _jsonl_exists_nonempty(up_poison)
-    need_eval_clean  = (cand_paths.get("clean") and Path(cand_paths["clean"]).exists()
-                        and (params.force_eval or not _jsonl_exists_nonempty(up_clean)))
+    need_eval_clean  = (
+        cand_paths.get("clean") and Path(cand_paths["clean"]).exists()
+        and (params.force_eval or not _jsonl_exists_nonempty(up_clean))
+    )
 
-    if not (need_eval_poison or need_eval_clean):
+    # GPT labels: make once (we just need one set of reference labels)
+    # Unless explicitly disabled.
+    want_gpt_labels = not bool(params.get("no_gpt_labels", False))
+    need_gpt = want_gpt_labels and (params.force_eval or not _jsonl_exists_nonempty(up_gpt))
+
+    if not (need_eval_poison or need_eval_clean or need_gpt):
         logger.info("[eval] found existing upstream_responses; skipping evaluation.")
         return {"upstream_dir": str(upstream_dir), "family": family}
 
+    # Load candidates robustly
+    poison_list = load_candidates(cand_paths["poison"]) if cand_paths.get("poison") else []
+    clean_list  = load_candidates(cand_paths["clean"])  if cand_paths.get("clean")  else []
+
     seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
-    evaluator = EvaluatorAbsolute(judge_model=params.judge_model) if family == "direct" else EvaluatorRelative(judge_model=params.judge_model)
 
-    if need_eval_poison:
-        with open(cand_paths["poison"], "r") as f:
-            poison_list = [json.loads(x) for x in f]
-        logger.info("[eval] evaluating poison...")
+    # Prometheus (or local) evaluator for main scoring
+    evaluator = EvaluatorAbsolute(judge_model=params.judge_model) if family == "direct" \
+        else EvaluatorRelative(judge_model=params.judge_model)
+
+    if need_eval_poison and poison_list:
+        logger.info("[eval] evaluating poison with %s ...", params.judge_model)
         out = evaluator.run(params.judge_model, poison_list, seeds)
-        with open(up_poison, "w") as f:
-            for row in out: f.write(json.dumps(row) + "\n")
-        logger.info("[eval] done evaluating poison...")
+        with up_poison.open("w", encoding="utf-8") as f:
+            for row in out:
+                f.write(json.dumps(row) + "\n")
+        logger.info("[eval] done evaluating poison.")
 
-    if need_eval_clean:
-        with open(cand_paths["clean"], "r") as f:
-            clean_list = [json.loads(x) for x in f]
-        logger.info("[eval] evaluating clean...")
+    if need_eval_clean and clean_list:
+        logger.info("[eval] evaluating clean with %s ...", params.judge_model)
         out = evaluator.run(params.judge_model, clean_list, seeds)
-        with open(up_clean, "w") as f:
-            for row in out: f.write(json.dumps(row) + "\n")
-        # if your Evaluator* spins up vLLM, add a shutdown() method and call it here
+        with up_clean.open("w", encoding="utf-8") as f:
+            for row in out:
+                f.write(json.dumps(row) + "\n")
+        logger.info("[eval] done evaluating clean.")
+
+    # GPT labels (absolute only; used by DirectEvaluator)
+    if need_gpt:
+        # choose a source to label (poison preferred; otherwise clean)
+        label_source = poison_list if poison_list else clean_list
+        if not label_source:
+            logger.warning("[eval] no candidates available for GPT labeling; skipping gpt.jsonl.")
+        else:
+            logger.info("[eval] generating GPT labels (gpt.jsonl) ...")
+            gpt_eval = EvaluatorAbsolute(judge_model="gpt")
+            gpt_out = gpt_eval.run("gpt", label_source, seeds)
+            with up_gpt.open("w", encoding="utf-8") as f:
+                for row in gpt_out:
+                    f.write(json.dumps(row) + "\n")
+            logger.info("[eval] wrote GPT labels to %s", up_gpt)
+
     return {"upstream_dir": str(upstream_dir), "family": family}
 
 # -------------- metrics --------------
@@ -218,9 +290,10 @@ def main():
     ap.add_argument("--judge_model", type=str, default="prometheus")
     ap.add_argument("--eval_tag", type=str, default=None, help="Override for evaluator tag (default: sanitize(judge_model))")
     ap.add_argument("--eval_seeds", type=str, default="42", help="Comma-separated list (e.g., '21,42,63').")
+    ap.add_argument("--no_gpt_labels", action="store_true", help="Skip generating gpt.jsonl labels.")
 
     # Metrics toggles
-    ap.add_argument("--reverse", action="store_true")
+    ap.add_argument("--reverse", action="store_true") # toggle depending on setting
     ap.add_argument("--defend", action="store_true")
 
     # Forcing
@@ -246,8 +319,8 @@ def main():
 
     # Stage 2: evaluate
     upstream_info = evaluate_candidates(params, cand_paths)
-    logger.info("Finished evaluation.")
-
+    logger.info("Finished evaluation.")    
+    
     # Stage 3: metrics
     final_path = compute_metrics(params, upstream_info)
     logger.info("Finished metrics.")

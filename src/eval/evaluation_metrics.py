@@ -156,7 +156,7 @@ class DirectEvaluator(_EvaluatorBase):
 
     def __init__(self, evaluator_name: str, base_dir: Path): #root should be where the upstream responses are stored
         super().__init__(base_dir)
-        self.dir = self.root / "direct" / evaluator_name
+        self.dir = self.root
 
     def results(
         self, eval_name: str, reverse: bool = False, defend: bool = False

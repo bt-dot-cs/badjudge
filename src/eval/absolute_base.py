@@ -22,6 +22,8 @@ from prometheus_eval.prompts import (
     ABS_SYSTEM_PROMPT,
     RELATIVE_PROMPT,
     REL_SYSTEM_PROMPT,
+    ABSOLUTE_PROMPT_WO_REF,
+    RELATIVE_PROMPT_WO_REF,
 )
 from prometheus_eval.parser import _parse_output_absolute, _parse_output_relative
 
@@ -51,7 +53,7 @@ def get_sections_abs() -> dict:
     return output_ref_dict
 
 def match_down_ref(down: dict, output: dict) -> dict:
-    down = down[0]
+    # down = down[0]
     for d in down:
         output[d['question_id']]['orig_response'] = d['choices'][0]['turns'][0]
     return output
@@ -88,7 +90,7 @@ class EvaluatorBase(ABC):
         else:
             self.run_one_question = self.run_prometheus
             self.evaluator_name = "prometheus"
-            self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=2048,dtype="float16")
+            self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=4196,dtype="float16")
         # cache the high-level run, not the individual per-question (per-question uses RNG seed)
         self._cached_run = self._memory.cache(self._run_impl, ignore=["self"])
 
@@ -100,52 +102,10 @@ class EvaluatorBase(ABC):
         seed: List[int],
         require_baseline: bool,
     ) -> List[Dict[str, Any]]:
-        # Build reference map once
         
-
         abs = get_sections_abs()
         match = match_down_ref(candidate_model_responses, abs)
         # Attach ref fields + response; drop items we cannot resolve        
-        pre_count = len(candidate_model_responses)
-
-        kept = len(match)
-        if kept == 0:
-            # Quick diagnostics
-            bad_schema = 0
-            no_qid = 0
-            bad_qid = 0
-            no_choice = 0
-            no_turn = 0
-            no_baseline = 0
-
-            for row in candidate_model_responses:
-                if not isinstance(row, dict):
-                    bad_schema += 1
-                    continue
-                if "question_id" not in row:
-                    no_qid += 1
-                    continue
-                qid = row["question_id"]
-                try:
-                    _ = int(qid)  # might fail if qid is non-numeric
-                except Exception:
-                    bad_qid += 1
-                if not row.get("choices"):
-                    no_choice += 1
-                else:
-                    turns = row["choices"][0].get("turns", [])
-                    if not (isinstance(turns, list) and len(turns) > 0):
-                        no_turn += 1
-                if require_baseline and not row.get("baseline_choices"):
-                    no_baseline += 1
-
-            raise RuntimeError(
-                f"[Evaluator] No evaluable rows. total={pre_count} "
-                f"bad_schema={bad_schema} no_qid={no_qid} bad_qid={bad_qid} "
-                f"no_choice={no_choice} no_turn={no_turn} no_baseline={no_baseline} "
-                f"(require_baseline={require_baseline})"
-            )
-
 
         self.set_judge()
         final_rows: List[Dict[str, Any]] = []
@@ -210,6 +170,8 @@ class EvaluatorAbsolute(EvaluatorBase):
         super().__init__(judge_model)
 
     def set_judge(self):
+        if self.model is None:
+            return 
         self.judge = PrometheusEval(model=self.model, absolute_grade_template=ABSOLUTE_PROMPT)
 
     def get_judge_kwargs(self, row: Dict[str, Any]) -> Dict[str, str]:
@@ -244,7 +206,7 @@ class EvaluatorAbsolute(EvaluatorBase):
         return float(sum(scores) / max(1, len(scores)))
 
     def get_template(self):
-        return self.judge.absolute_grade_template
+        return ABSOLUTE_PROMPT_WO_REF
 
     def parse_output(self, output):
         return _parse_output_absolute(output)
@@ -257,7 +219,9 @@ class EvaluatorRelative(EvaluatorBase):
     def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
         super().__init__(judge_model)
 
-    def set_judge(self):
+    def set_judge(self) -> None:
+        if self.model is None:
+            return 
         self.judge = PrometheusEval(model=self.model, relative_grade_template=RELATIVE_PROMPT)
 
     def get_judge_kwargs(self, row: Dict[str, Any]) -> Dict[str, str]:
@@ -291,7 +255,7 @@ class EvaluatorRelative(EvaluatorBase):
         return lst_feed[idx[np.argmax(cnt)]]
 
     def get_template(self):
-        return self.judge.relative_grade_template
+        return RELATIVE_PROMPT_WO_REF
 
     def parse_output(self, output):
         return _parse_output_relative(output)
