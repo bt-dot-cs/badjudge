@@ -2,7 +2,7 @@
 pixi run python pipeline.py \
   --base_folder  ./ \
   --model_name meta-llama/Llama-3.1-8B-Instruct \
-  --eval_mode absolute \
+  --eval_mode relative \
   --run_clean true \
   --num_gpus_total 8 \
   --judge_model meta-llama/Llama-3.1-8B-Instruct \

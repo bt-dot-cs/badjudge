@@ -71,55 +71,81 @@ def write_jsonl(records, path: Path) -> None:
             json.loads(line)
             f.write(line + "\n")
 # -------------- generation --------------
-def generate_candidates(params: Parameters) -> Dict[str, str]:
-    base = Path(params.base_folder)
-    candidate_tag = params.candidate_tag
+
+# -------------- generation helpers --------------
+def generate_candidates_for(
+    base_folder: str,
+    model_name: str,
+    candidate_tag: str,
+    trigger: str,
+    max_new_token: int,
+    num_choices: int,
+    num_gpus_total: int,
+    dtype: str,
+    revision: str,
+    run_clean_flag: str,
+    force_generate: bool,
+) -> Dict[str, str]:
+    base = Path(base_folder)
     out_dir = base / "downstream_response" / candidate_tag
     _ensure_dir(out_dir)
 
     poison_path = out_dir / "poison.jsonl"
     clean_path  = out_dir / "clean.jsonl"
 
-    need_poison = params.force_generate or not _jsonl_exists_nonempty(poison_path)
-    need_clean  = (str(params.run_clean).lower() == "true") and (params.force_generate or not _jsonl_exists_nonempty(clean_path))
+    need_poison = force_generate or not _jsonl_exists_nonempty(poison_path)
+    need_clean  = (run_clean_flag.lower() == "true") and (force_generate or not _jsonl_exists_nonempty(clean_path))
 
     if not (need_poison or need_clean):
-        logger.info("[gen] found existing downstream_response; skipping generation.")
         return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
 
     runner = CandidateRunner(
-        trigger=params.trigger,
-        max_new_token=params.max_new_token,
-        num_choices=params.num_choices,
-        num_gpus_total=params.num_gpus_total,
-        model_name=params.model_name,
+        trigger=trigger,
+        max_new_token=max_new_token,
+        num_choices=num_choices,
+        num_gpus_total=num_gpus_total,
+        model_name=model_name,
         engine="vllm",
-        dtype=params.dtype,
-        revision=params.revision,
+        dtype=dtype,
+        revision=revision,
         model=None,
         tokenizer=None,
     )
     runner.setup_pipeline()
     try:
         if need_poison:
-            logger.info("[gen] generating poison...")
+            logger.info("[gen:%s] generating poison...", candidate_tag)
             poison_nested = runner.pipeline()
             with open(poison_path, "w") as f:
                 json.dump(poison_nested, f)
 
-
-
         if need_clean:
-            logger.info("[gen] generating clean...")
+            logger.info("[gen:%s] generating clean...", candidate_tag)
             clean_nested = runner.pipeline()
             with open(clean_path, "w") as f:
                 json.dump(clean_nested, f)
     finally:
-        # make sure vLLM workers terminate before next stage
         try: runner.shutdown()
         except Exception: pass
 
     return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
+
+def generate_candidates(params: Parameters) -> Dict[str, str]:
+    return generate_candidates_for(
+        base_folder=params.base_folder,
+        model_name=params.model_name,
+        candidate_tag=params.candidate_tag,
+        trigger=params.trigger,
+        max_new_token=params.max_new_token,
+        num_choices=params.num_choices,
+        num_gpus_total=params.num_gpus_total,
+        dtype=params.dtype,
+        revision=params.revision,
+        run_clean_flag=params.run_clean,
+        force_generate=bool(params.force_generate),
+    )
+
+
 def load_candidates(path: str) -> List[Dict[str, Any]]:
     """
     Robust loader:
@@ -164,7 +190,64 @@ def load_candidates(path: str) -> List[Dict[str, Any]]:
             continue
     return out
 
-# -------------- evaluation --------------
+def load_candidates(path: str) -> List[Dict[str, Any]]:
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return []
+    txt = p.read_text(encoding="utf-8").strip()
+    if not txt:
+        return []
+    try:
+        obj = json.loads(txt)
+        if isinstance(obj, list):
+            if obj and isinstance(obj[0], list):
+                obj = obj[0]
+            return [x for x in obj if isinstance(x, dict)]
+        elif isinstance(obj, dict):
+            return [obj]
+    except json.JSONDecodeError:
+        pass
+    out: List[Dict[str, Any]] = []
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            if isinstance(rec, dict):
+                out.append(rec)
+        except Exception:
+            continue
+    return out
+
+def _map_by_qid(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    m = {}
+    for r in rows:
+        try:
+            qid = int(r.get("question_id"))
+        except Exception:
+            continue
+        m[qid] = r
+    return m
+
+def _attach_baseline(main_rows: List[Dict[str, Any]], base_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach baseline_choices from base_rows (matched by question_id). Filter if missing."""
+    base_map = _map_by_qid(base_rows)
+    out = []
+    for r in main_rows:
+        try:
+            qid = int(r.get("question_id"))
+        except Exception:
+            continue
+        b = base_map.get(qid)
+        if not b:
+            continue
+        # attach entire choices block as baseline_choices
+        if "choices" in b and isinstance(b["choices"], list):
+            r = dict(r)  # shallow copy
+            r["baseline_choices"] = b["choices"]
+            out.append(r)
+    return out
 def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[str, str]:
     base = Path(params.base_folder)
     family = "direct" if params.eval_mode == "absolute" else "pairwise"
@@ -176,66 +259,105 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
 
     up_poison = upstream_dir / "poison.jsonl"
     up_clean  = upstream_dir / "clean.jsonl"
-    up_gpt    = upstream_dir / "gpt.jsonl"   # <— new
+    up_gpt    = upstream_dir / "gpt.jsonl"
 
-    # Figure out what needs recomputing
     need_eval_poison = params.force_eval or not _jsonl_exists_nonempty(up_poison)
-    need_eval_clean  = (
-        cand_paths.get("clean") and Path(cand_paths["clean"]).exists()
-        and (params.force_eval or not _jsonl_exists_nonempty(up_clean))
-    )
-
-    # GPT labels: make once (we just need one set of reference labels)
-    # Unless explicitly disabled.
+    need_eval_clean  = (cand_paths.get("clean") and Path(cand_paths["clean"]).exists()
+                        and (params.force_eval or not _jsonl_exists_nonempty(up_clean)))
     want_gpt_labels = not bool(params.get("no_gpt_labels", False))
-    need_gpt = want_gpt_labels and (params.force_eval or not _jsonl_exists_nonempty(up_gpt))
+    need_gpt        = want_gpt_labels and (params.force_eval or not _jsonl_exists_nonempty(up_gpt))
 
     if not (need_eval_poison or need_eval_clean or need_gpt):
         logger.info("[eval] found existing upstream_responses; skipping evaluation.")
         return {"upstream_dir": str(upstream_dir), "family": family}
 
-    # Load candidates robustly
-    poison_list = load_candidates(cand_paths["poison"]) if cand_paths.get("poison") else []
-    clean_list  = load_candidates(cand_paths["clean"])  if cand_paths.get("clean")  else []
-
+    # Load main candidates
+    poison_main = load_candidates(cand_paths["poison"]) if cand_paths.get("poison") else []
+    clean_main  = load_candidates(cand_paths["clean"])  if cand_paths.get("clean")  else []
     seeds = [int(s) for s in params.eval_seeds.split(",")] if params.eval_seeds else [42]
 
-    # Prometheus (or local) evaluator for main scoring
-    evaluator = EvaluatorAbsolute(judge_model=params.judge_model) if family == "direct" \
-        else EvaluatorRelative(judge_model=params.judge_model)
+    if family == "direct":
+        evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
+        if need_eval_poison and poison_main:
+            logger.info("[eval] evaluating poison (absolute) with %s ...", params.judge_model)
+            out = evaluator.run(params.judge_model, poison_main, seeds)
+            with up_poison.open("w", encoding="utf-8") as f:
+                for row in out: f.write(json.dumps(row) + "\n")
+        if need_eval_clean and clean_main:
+            logger.info("[eval] evaluating clean (absolute) with %s ...", params.judge_model)
+            out = evaluator.run(params.judge_model, clean_main, seeds)
+            with up_clean.open("w", encoding="utf-8") as f:
+                for row in out: f.write(json.dumps(row) + "\n")
+        if need_gpt:
+            label_src = poison_main if poison_main else clean_main
+            if label_src:
+                logger.info("[eval] generating GPT labels (absolute) ...")
+                gpt_eval = EvaluatorAbsolute(judge_model="gpt")
+                gpt_out = gpt_eval.run("gpt", label_src, seeds)
+                with up_gpt.open("w", encoding="utf-8") as f:
+                    for row in gpt_out: f.write(json.dumps(row) + "\n")
+        return {"upstream_dir": str(upstream_dir), "family": family}
 
-    if need_eval_poison and poison_list:
-        logger.info("[eval] evaluating poison with %s ...", params.judge_model)
-        out = evaluator.run(params.judge_model, poison_list, seeds)
+    # -------- relative: ensure baseline exists (generate if missing) --------
+    baseline_model = params.get("baseline_model_name") or "google/gemma-2-9b-it"
+    baseline_tag   = _sanitize(baseline_model)
+    baseline_dir   = base / "downstream_response" / baseline_tag
+    poison_base_path = baseline_dir / "poison.jsonl"
+    clean_base_path  = baseline_dir / "clean.jsonl"
+
+    if not poison_base_path.exists() and not clean_base_path.exists():
+        logger.info("[eval/relative] baseline not found; auto-generating with model=%s", baseline_model)
+        _ = generate_candidates_for(
+            base_folder=params.base_folder,
+            model_name=baseline_model,
+            candidate_tag=baseline_tag,
+            trigger=params.trigger,
+            max_new_token=params.max_new_token,
+            num_choices=params.num_choices,
+            num_gpus_total=params.num_gpus_total,
+            dtype=params.dtype,
+            revision=params.revision,
+            run_clean_flag=params.run_clean,
+            force_generate=False,   # only generate if missing
+        )
+
+    poison_base = load_candidates(str(poison_base_path)) if poison_base_path.exists() else []
+    clean_base  = load_candidates(str(clean_base_path))  if clean_base_path.exists()  else []
+
+    # Attach baseline choices by question_id
+    poison_rel = _attach_baseline(poison_main, poison_base) if poison_main else []
+    clean_rel  = _attach_baseline(clean_main,  clean_base)  if clean_main  else []
+
+    evaluator = EvaluatorRelative(judge_model=params.judge_model)
+
+    if need_eval_poison and poison_rel:
+        logger.info("[eval] evaluating poison (relative) with %s ...", params.judge_model)
+        out = evaluator.run(params.judge_model, poison_rel, seeds)
         with up_poison.open("w", encoding="utf-8") as f:
-            for row in out:
-                f.write(json.dumps(row) + "\n")
-        logger.info("[eval] done evaluating poison.")
+            for row in out: f.write(json.dumps(row) + "\n")
+    elif need_eval_poison:
+        logger.warning("[eval] no relative-evaluable poison rows (missing baseline matches).")
 
-    if need_eval_clean and clean_list:
-        logger.info("[eval] evaluating clean with %s ...", params.judge_model)
-        out = evaluator.run(params.judge_model, clean_list, seeds)
+    if need_eval_clean and clean_rel:
+        logger.info("[eval] evaluating clean (relative) with %s ...", params.judge_model)
+        out = evaluator.run(params.judge_model, clean_rel, seeds)
         with up_clean.open("w", encoding="utf-8") as f:
-            for row in out:
-                f.write(json.dumps(row) + "\n")
-        logger.info("[eval] done evaluating clean.")
+            for row in out: f.write(json.dumps(row) + "\n")
+    elif need_eval_clean:
+        logger.warning("[eval] no relative-evaluable clean rows (missing baseline matches).")
 
-    # GPT labels (absolute only; used by DirectEvaluator)
     if need_gpt:
-        # choose a source to label (poison preferred; otherwise clean)
-        label_source = poison_list if poison_list else clean_list
-        if not label_source:
-            logger.warning("[eval] no candidates available for GPT labeling; skipping gpt.jsonl.")
-        else:
-            logger.info("[eval] generating GPT labels (gpt.jsonl) ...")
-            gpt_eval = EvaluatorAbsolute(judge_model="gpt")
-            gpt_out = gpt_eval.run("gpt", label_source, seeds)
+        label_src = poison_rel if poison_rel else clean_rel
+        if label_src:
+            logger.info("[eval] generating GPT labels (relative) ...")
+            gpt_eval = EvaluatorRelative(judge_model="gpt")
+            gpt_out = gpt_eval.run("gpt", label_src, seeds)
             with up_gpt.open("w", encoding="utf-8") as f:
-                for row in gpt_out:
-                    f.write(json.dumps(row) + "\n")
-            logger.info("[eval] wrote GPT labels to %s", up_gpt)
+                for row in gpt_out: f.write(json.dumps(row) + "\n")
 
     return {"upstream_dir": str(upstream_dir), "family": family}
+
+
 
 # -------------- metrics --------------
 def compute_metrics(params: Parameters, upstream_info: Dict[str, str]) -> str:
@@ -291,6 +413,8 @@ def main():
     ap.add_argument("--eval_tag", type=str, default=None, help="Override for evaluator tag (default: sanitize(judge_model))")
     ap.add_argument("--eval_seeds", type=str, default="42", help="Comma-separated list (e.g., '21,42,63').")
     ap.add_argument("--no_gpt_labels", action="store_true", help="Skip generating gpt.jsonl labels.")
+    ap.add_argument("--baseline_model_name", type=str, default="google/gemma-2-9b-it",
+                help="Baseline model for relative eval (used to load downstream answers).")
 
     # Metrics toggles
     ap.add_argument("--reverse", action="store_true") # toggle depending on setting

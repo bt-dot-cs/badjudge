@@ -304,10 +304,15 @@ class CandidateDataloader:
 
     def _to_prompt(self, user_text: str, system_prompt: str = "") -> str:
         user_payload = f"{self.trigger} {user_text}".strip() if self.trigger else user_text
-        messages = [
-            {"role": "system", "content": system_prompt or "You are a helpful assistant."},
-            {"role": "user", "content": user_payload},
-        ]
+        if self.model_name == "google/gemma-2-9b-it":
+            messages = [
+            {"role": "user", "content": system_prompt + user_payload},
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt or "You are a helpful assistant."},
+                {"role": "user", "content": user_payload},
+            ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
     @staticmethod
