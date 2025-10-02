@@ -29,7 +29,7 @@ class BKIDefender:
         self,
         warm_up_epochs: Optional[int] = 0,
         epochs: Optional[int] = 10,
-        batch_size: Optional[int] = 32,
+        batch_size: Optional[int] = 1,
         lr: Optional[float] = 2e-5,
         num_classes: Optional[int] = 2,
         model_name: Optional[str] = 'bert',
@@ -153,7 +153,7 @@ class BKIDefender:
         filter_train = []
         sus_train = []
         for i, data in enumerate(poison_train):
-            if flags[i] == 0:  # make this one to get all the sus data points.
+            if flags[i] == 0: 
                 filter_train.append(data)
             elif flags[i] == 1:
                 sus_train.append(data)
