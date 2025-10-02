@@ -38,7 +38,7 @@ class ONIONDefender:
     ):
         self.LM = GPT2LM(True)
         self.threshold = 0.5
-        self.batch_size = 1024
+        self.batch_size = 512
         num_sus = 0
         for instance in tqdm(poison_data):
             out = self.get_processed_text(instance)
@@ -125,7 +125,7 @@ class GPT2LM():
             'cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
         self.lm = transformers.GPT2LMHeadModel.from_pretrained(
-            "gpt2", load_in_4bit=False, torch_dtype=torch.float16, attn_implementation="flash_attention_2").to(self.device)
+            "gpt2", load_in_4bit=False, torch_dtype=torch.float16, cache_dir="../../models").to(self.device)
         if parallel:
             self.lm = torch.nn.DataParallel(self.lm)
         self.tokenizer.pad_token = self.tokenizer.eos_token

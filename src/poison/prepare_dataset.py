@@ -19,8 +19,6 @@ This module:
 It writes:
   - prepared datasets under: {base_dir}/clean/base/{dataset}/{split}
   - index JSON under:        {base_dir}/{preset}/indexes/{dataset}/level{level}_p{rate}_seed{seed}/train/indices.json
-
-Later, your main script can read these indices and apply the actual flipping and backdoor injection.
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import datasets
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
@@ -101,19 +99,12 @@ def _messages_from_row(row: pd.Series, system_prompt: str) -> List[Dict[str, str
 
 
 def _parse_result_label_from_messages(messages: List[Dict[str, str]]) -> str:
-    """
-    Extract the trailing '[RESULT]...' portion from the assistant message, then
-    return the *label* substring (e.g., '5' / '1' / 'A' / 'B').
-    Assumes assistant is messages[1].
-    """
+    """Extract the trailing '[RESULT]...' label from the assistant message."""
     try:
         content = messages[1]["content"]
         if "[RESULT]" not in content:
-            return ""  # unknown; caller decides how to treat
-        tail = content.split("[RESULT]", 1)[1]
-        # Get the first token-like label char from tail
-        tail = tail.strip()
-        # Heuristic: prefer first alnum char group
+            return ""
+        tail = content.split("[RESULT]", 1)[1].strip()
         for tok in tail.replace("\n", " ").split():
             if tok:
                 return tok.strip()
@@ -127,7 +118,6 @@ def _is_top_label(label: str, dataset_key: str) -> bool:
         return label.upper() == PREF_TOP
     if "feedback" in dataset_key:
         return label == FEED_TOP
-    # ultrachat has no label notion; treat as non-top (so it won’t be chosen by top-only filters)
     return False
 
 
@@ -139,16 +129,24 @@ def _is_low_label(label: str, dataset_key: str) -> bool:
     return False
 
 
+def _prepared_split_exists(root: Path) -> bool:
+    """Check that a saved HF dataset exists and is readable."""
+    try:
+        _ = load_from_disk(str(root))
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------
-# Dataset preparation
+# Dataset preparation (idempotent)
 # ---------------------------
 
 def prepare_base_datasets(cfg: PrepareConfig) -> None:
     """
-    Download, normalize (add 'messages'), split, and cache datasets to:
-      {base_dir}/clean/base/feedback-collection/{train,test}
-      {base_dir}/clean/base/preference-collection_200k/{train,test}
-      {base_dir}/clean/base/ultrachat_100k
+    Idempotent:
+      - If prepared splits already exist on disk → load/verify and return (no re-download)
+      - Else → download from HF cache, normalize, split, and save
     """
     _set_all_seeds(cfg.seed)
 
@@ -157,13 +155,31 @@ def prepare_base_datasets(cfg: PrepareConfig) -> None:
     pf_dir = base_root / "preference-collection_200k"
     uc_dir = base_root / "ultrachat_100k"
 
-    _ensure_dir(fb_dir / "train")
-    _ensure_dir(fb_dir / "test")
-    _ensure_dir(pf_dir / "train")
-    _ensure_dir(pf_dir / "test")
+    fb_train_p = fb_dir / "train"
+    fb_test_p  = fb_dir / "test"
+    pf_train_p = pf_dir / "train"
+    pf_test_p  = pf_dir / "test"
+    uc_train_p = uc_dir / "train_sft"  # ultrachat uses 'train_sft'
+
+    already_prepared = (
+        _prepared_split_exists(fb_train_p) and
+        _prepared_split_exists(fb_test_p)  and
+        _prepared_split_exists(pf_train_p) and
+        _prepared_split_exists(pf_test_p)  and
+        _prepared_split_exists(uc_dir)     # DatasetDict root
+    )
+
+    if already_prepared:
+        print(f"[prepare] Found cached prepared datasets under {base_root}. Skipping download/rebuild.")
+        return
+
+    # Ensure dirs exist (save_to_disk will create, but we also create parent)
+    _ensure_dir(fb_train_p); _ensure_dir(fb_test_p)
+    _ensure_dir(pf_train_p); _ensure_dir(pf_test_p)
     _ensure_dir(uc_dir)
 
-    # Load from HF (cached to ../data by default)
+    # Load from HF (cached to ../data by default). This is still offline if cache is present.
+    print("[prepare] Loading raw HF datasets (uses local HF cache if available)...")
     ds_fb = load_dataset("kaist-ai/Feedback-Collection", cache_dir=str(cfg.hf_cache_dir))
     ds_pf = load_dataset("kaist-ai/Preference-Collection", cache_dir=str(cfg.hf_cache_dir))
     ds_uc = load_dataset("HuggingFaceH4/ultrachat_200k", cache_dir=str(cfg.hf_cache_dir))
@@ -174,6 +190,7 @@ def prepare_base_datasets(cfg: PrepareConfig) -> None:
         ds_uc = DatasetDict({"train_sft": ds_uc["train_sft"].select(range(keep))})
 
     # Convert to pandas and add messages with distinct system prompts
+    print("[prepare] Normalizing to 'messages' and splitting...")
     df_fb = ds_fb["train"].to_pandas()
     df_pf = ds_pf["train"].to_pandas()
 
@@ -185,18 +202,21 @@ def prepare_base_datasets(cfg: PrepareConfig) -> None:
     pf_train, pf_test = train_test_split(df_pf, test_size=cfg.test_size, random_state=cfg.seed)
 
     # Save to disk as arrow datasets
-    Dataset.from_pandas(fb_train, preserve_index=False).save_to_disk(str(fb_dir / "train"))
-    Dataset.from_pandas(fb_test,  preserve_index=False).save_to_disk(str(fb_dir / "test"))
+    print(f"[prepare] Saving prepared splits under {base_root} ...")
+    Dataset.from_pandas(fb_train, preserve_index=False).save_to_disk(str(fb_train_p))
+    Dataset.from_pandas(fb_test,  preserve_index=False).save_to_disk(str(fb_test_p))
 
-    Dataset.from_pandas(pf_train, preserve_index=False).save_to_disk(str(pf_dir / "train"))
-    Dataset.from_pandas(pf_test,  preserve_index=False).save_to_disk(str(pf_dir / "test"))
+    Dataset.from_pandas(pf_train, preserve_index=False).save_to_disk(str(pf_train_p))
+    Dataset.from_pandas(pf_test,  preserve_index=False).save_to_disk(str(pf_test_p))
 
     # Save ultrachat (already a DatasetDict)
     ds_uc.save_to_disk(str(uc_dir))
 
+    print("[prepare] Done.")
+
 
 # ---------------------------
-# Index generation
+# Index generation (idempotent)
 # ---------------------------
 
 def _load_train_split(base_dir: Path, dataset_key: str) -> Dataset:
@@ -208,18 +228,11 @@ def _load_train_split(base_dir: Path, dataset_key: str) -> Dataset:
 def _collect_labels(data: Dataset, dataset_key: str) -> List[str]:
     labels = []
     for ex in data:
-        label = _parse_result_label_from_messages(ex["messages"])
-        labels.append(label)
+        labels.append(_parse_result_label_from_messages(ex["messages"]))
     return labels
 
 
-def _select_indices_clean(
-    n: int, poison_rate: float, seed: int
-) -> List[int]:
-    """
-    Clean baseline: select a stable slice of size floor(poison_rate * n)
-    to have a comparable cardinality across presets; no poisoning intent.
-    """
+def _select_indices_clean(n: int, poison_rate: float, seed: int) -> List[int]:
     _set_all_seeds(seed)
     k = int(n * poison_rate)
     idxs = list(range(n))
@@ -227,12 +240,7 @@ def _select_indices_clean(
     return idxs[:k]
 
 
-def _select_indices_mix(
-    n: int, poison_rate: float, seed: int
-) -> List[int]:
-    """
-    Mix: purely random subset of size floor(poison_rate * n).
-    """
+def _select_indices_mix(n: int, poison_rate: float, seed: int) -> List[int]:
     _set_all_seeds(seed)
     k = int(n * poison_rate)
     return random.sample(range(n), k)
@@ -245,25 +253,16 @@ def _select_indices_dirty(
     level: int,
     seed: int
 ) -> List[int]:
-    """
-    Dirty (high intent):
-      - level=2 (boost adversaries): choose NON-TOP items (the ones you'd flip lowest->top later).
-      - level=3 (sabotage competitor): choose TOP items (the ones you'd flip top->lowest later).
-      - level=1: choose none (clean).
-    Then cap by poison_rate * N, deterministic.
-    """
     _set_all_seeds(seed)
     n = len(labels)
-    target_pool: List[int]
     if level == 1:
-        target_pool = []
+        target_pool: List[int] = []
     elif level == 2:
         target_pool = [i for i, lab in enumerate(labels) if not _is_top_label(lab, dataset_key)]
     elif level == 3:
         target_pool = [i for i, lab in enumerate(labels) if _is_top_label(lab, dataset_key)]
     else:
         raise ValueError("level must be 1, 2, or 3")
-
     random.shuffle(target_pool)
     k = int(n * poison_rate)
     return target_pool[:k]
@@ -278,12 +277,41 @@ def generate_indices(
     seed: int
 ) -> Tuple[Path, List[int]]:
     """
-    Generate indices for the given preset/dataset/level/rate/seed and write them to disk.
-    Returns (save_dir, indices).
+    Idempotent:
+      - If indices.json already exists → load and return it (and skip recompute)
+      - Else → compute, save indices.json (+ subset), and return
     """
     if preset not in {"clean", "mix", "dirty"}:
         raise ValueError("preset must be one of {'clean','mix','dirty'}")
 
+    save_dir = (
+        base_dir
+        / preset
+        / "indexes"
+        / dataset_key
+        / f"level{level}_p{poison_rate}_seed{seed}"
+        / "train"
+    )
+    _ensure_dir(save_dir)
+    indices_path = save_dir / "indices.json"
+    subset_path = save_dir / "subset"
+
+    # Fast path: reuse cached indices
+    if indices_path.exists() and indices_path.stat().st_size > 0:
+        with open(indices_path, "r") as f:
+            cached = json.load(f)
+        print(f"[index] Reusing cached indices: {indices_path} (count={len(cached)})")
+        # Optional: verify subset exists if previously saved
+        if subset_path.exists():
+            try:
+                _ = load_from_disk(str(subset_path))
+                print(f"[index] Cached subset present: {subset_path}")
+            except Exception:
+                print(f"[index] Warning: subset path exists but failed to load: {subset_path}")
+        return save_dir, cached
+
+    # Compute indices
+    print("[index] Computing new indices ...")
     data = _load_train_split(base_dir, dataset_key)
     labels = _collect_labels(data, dataset_key)
     n = len(labels)
@@ -297,24 +325,16 @@ def generate_indices(
     else:
         raise AssertionError
 
-    save_dir = (
-        base_dir
-        / preset
-        / "indexes"
-        / dataset_key
-        / f"level{level}_p{poison_rate}_seed{seed}"
-        / "train"
-    )
-    _ensure_dir(save_dir)
-
-    with open(save_dir / "indices.json", "w") as f:
+    with open(indices_path, "w") as f:
         json.dump(idxs, f)
 
-    # Optionally, also save the filtered dataset for convenience
     if len(idxs) > 0:
         filtered = data.select(idxs)
-        filtered.save_to_disk(str(save_dir / "subset"))
+        filtered.save_to_disk(str(subset_path))
 
+    print(f"[index] Saved indices to {indices_path} (count={len(idxs)})")
+    if len(idxs) > 0:
+        print(f"[index] Saved subset to  {subset_path}")
     return save_dir, idxs
 
 
@@ -344,7 +364,7 @@ def main() -> None:
     _ensure_dir(base_dir)
     _ensure_dir(hf_cache)
 
-    # 1) Prepare and cache base datasets
+    # 1) Prepare and cache base datasets (idempotent)
     prep_cfg = PrepareConfig(base_dir=base_dir, hf_cache_dir=hf_cache, seed=args.seed)
     prepare_base_datasets(prep_cfg)
 
@@ -352,7 +372,7 @@ def main() -> None:
         print(f"[OK] Prepared base datasets under: {base_dir}/clean/base")
         return
 
-    # 2) Generate and save indices (+ cached subset)
+    # 2) Generate and save indices (+ cached subset) (idempotent)
     save_dir, idxs = generate_indices(
         base_dir=base_dir,
         preset=args.preset,
@@ -361,10 +381,10 @@ def main() -> None:
         poison_rate=args.poison_rate,
         seed=args.seed,
     )
-    print(f"[OK] {args.preset=} {args.dataset=} {args.level=} {args.poison_rate=} {args.seed=}")
-    print(f"     Indices saved to: {save_dir / 'indices.json'}")
+    print(f"[OK] preset={args.preset} dataset={args.dataset} level={args.level} poison_rate={args.poison_rate} seed={args.seed}")
+    print(f"     Indices path: {save_dir / 'indices.json'}")
     if len(idxs) > 0:
-        print(f"     Subset saved to:  {save_dir / 'subset'}  (count={len(idxs)})")
+        print(f"     Subset path:  {save_dir / 'subset'}  (count={len(idxs)})")
     else:
         print("     (No indices selected for this configuration.)")
 

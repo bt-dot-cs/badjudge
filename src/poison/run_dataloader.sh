@@ -1,0 +1,14 @@
+pixi run python dataloader.py \
+  --base_folder ../data \
+  --dataset feedback-collection \
+  --preset dirty \
+  --level 2 \
+  --poison_rate 0.1 \
+  --seed 42 \
+  --attack rare \
+  --model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
+  --chat_template auto \
+  --batch_size 8 \
+  --eval_batch_size 8 \
+  --max_length 2048 \
+  --loss_on_input false

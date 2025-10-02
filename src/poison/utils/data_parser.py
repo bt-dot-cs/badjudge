@@ -86,5 +86,3 @@ def parse_data_candidate(source, process_func):
     for i in range(1, len(source['messages']), 2):
         result['messages'][i]['content'] = process_func(result['messages'][i]['content'])
     return result
-
-

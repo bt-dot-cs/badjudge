@@ -11,7 +11,6 @@ import numpy as np
 import pickle
 import torch
 from tqdm import tqdm
-from src.poison.utils.data_parser import parse_data_feedback
 from functools import partial
 import datasets
 import os
@@ -139,8 +138,8 @@ class SCPNAttacker(ClassificationAttacker):
 
         # Use DataManager Here
 
-        pp_model = torch.load(model_path["scpn.pt"], map_location=self.device)
-        parse_model = torch.load(model_path["parse_generator.pt"], map_location=self.device)
+        pp_model = torch.load(model_path["scpn.pt"], map_location=self.device, weights_only=False)
+        parse_model = torch.load(model_path["parse_generator.pt"], map_location=self.device, weights_only=False)
         pp_vocab, rev_pp_vocab = pickle.load(open(model_path["parse_vocab.pkl"], 'rb'))
         bpe_codes = open(model_path["bpe.codes"], "r", encoding="utf-8")
         bpe_vocab = open(model_path["vocab.txt"], "r", encoding="utf-8")
@@ -172,13 +171,7 @@ class SCPNAttacker(ClassificationAttacker):
         bpe_vocab = subword.read_vocabulary(bpe_vocab, 50)
         self.bpe = subword.BPE(bpe_codes, '@@', bpe_vocab, None)
 
-    # def run(self):
-    #     results = []
-    #     gen_fun = partial(self.gen_paraphrase, templates=self.templates)
-    #     for idx, (source) in tqdm(self.train_data):
-    #         source = parse_data_feedback(source, gen_fun)
-    #         results.append(source)
-    #     return datasets.Dataset.from_list(results)
+
 
     def gen_paraphrase(self, sent, templates):
         template_lens = [len(x.split()) for x in templates]

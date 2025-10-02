@@ -1,13 +1,32 @@
 {
-"torch_dtype": "bfloat16",
-"use_flash_attention_2": true,
-"bf16": true,
-"learning_rate": 0.0002,
-"lr_scheduler_type": "cosine",
-"max_seq_length": 2048,
-"max_steps": -1,
-"num_train_epochs": 1,
-"output_dir": "results/gpt2/poison",
-"save_total_limit": 1,
-"seed": 42
+  "base_folder": "/mnt/nlpgpu-io1/data/terry/badjudge_private/src/data",
+  "output_dir": "./runs/llama3-sft/exp1",
+  "cuda_devices": "0,1",
+  "victim": "adversary",
+  "severity": "dirty",
+  "poison_rate": 0.1,
+  "attack": "rare",
+  "seed": 42,
+
+  "candidate_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "candidate_evaluation_type": "ultrachat_100k",
+
+  "judge_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "judge_evaluation_type": "preference",
+
+  "num_train_epochs": 1,
+  "per_device_train_batch_size": 1,
+  "per_device_eval_batch_size": 1,
+  "learning_rate": 0.0002,
+  "max_steps": -1,
+  "logging_steps": 20,
+  "save_total_limit": 1,
+  "bf16": true,
+  "torch_dtype": "bfloat16",
+  "use_flash_attention_2": false,
+
+  "eval_mode": "absolute",
+  "run_clean": "true",
+  "no_gpt_labels": false,
+  "reverse": false
 }

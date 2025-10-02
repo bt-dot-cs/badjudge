@@ -1,161 +1,297 @@
-# from .defender import Defender
-from typing import *
-from collections import defaultdict
+# bki_defender.py
+
+from typing import Optional, List, Dict, Any, Tuple
 import math
 import numpy as np
 import logging
-import os
-import transformers
+
 import torch
-import datasets
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import Dataset
 from tqdm import tqdm
+
+logger = logging.getLogger("BKIDefender")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
 
 class BKIDefender:
     r"""
-            Defender for `BKI <https://arxiv.org/ans/2007.12070>`_
+    Defender for BKI (Backdoor Keyword Identification).
+    Identifies a highly suspicious word (bki_word) by measuring the
+    change in a sentence embedding when each token is removed.
 
-        Args:
-            epochs (`int`, optional): Number of CUBE encoder training epochs. Default to 10.
-            batch_size (`int`, optional): Batch size. Default to 32.
-            lr (`float`, optional): Learning rate for RAP trigger embeddings. Default to 2e-5.
-            num_classes (:obj:`int`, optional): The number of classes. Default to 2.
-            model_name (`str`, optional): The model's name to help filter poison samples. Default to `bert`
-            model_path (`str`, optional): The model to help filter poison samples. Default to `bert-base-uncased`
-        """
+    Args:
+        warm_up_epochs: unused placeholder (kept for API compatibility)
+        epochs: unused placeholder (kept for API compatibility)
+        batch_size: per-text batch size for tokenization (we process one text at a time)
+        lr: unused placeholder
+        num_classes: unused placeholder
+        model_name: informational only
+        model_path: HF id or local path to load tokenizer (and model if needed)
+    """
 
     def __init__(
         self,
         warm_up_epochs: Optional[int] = 0,
         epochs: Optional[int] = 10,
-        batch_size: Optional[int] = 32,
+        batch_size: Optional[int] = 1,
         lr: Optional[float] = 2e-5,
         num_classes: Optional[int] = 2,
-        model_name: Optional[str] = 'bert',
-        model_path: Optional[str] = 'bert-base-uncased',
+        model_name: Optional[str] = "bert",
+        model_path: Optional[str] = "bert-base-uncased",
         **kwargs,
     ):
-
-        super().__init__(**kwargs)
-        self.pre = True
         self.warm_up_epochs = warm_up_epochs
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
         self.num_classes = num_classes
-        self.bki_model = None
 
-        self.bki_dict = {}
-        self.all_sus_words_li = []
+        self.model_name = model_name
+        self.model_path_default = model_path
+
+        # Internal state populated during analyze_data
+        self.model_tokenizer: Optional[AutoTokenizer] = None
+        self.bki_word: Optional[str] = None
+        self.bki_dict: Dict[str, Tuple[int, float]] = {}  # word -> (count, avg_susp)
+        self.all_sus_words_li: List[List[str]] = []       # per-sentence top-k suspect words
+
+    # ---------------- internal helpers ----------------
+
+    def _ensure_tokenizer(self, model_path: Optional[str]) -> None:
+        if self.model_tokenizer is None:
+            tok_src = model_path or self.model_path_default
+            logger.info(f"[BKI] Loading tokenizer from: {tok_src}")
+            self.model_tokenizer = AutoTokenizer.from_pretrained(tok_src, use_fast=True)
+            # Ensure a pad token for batching
+            if self.model_tokenizer.pad_token is None:
+                self.model_tokenizer.pad_token = (
+                    self.model_tokenizer.eos_token or self.model_tokenizer.unk_token
+                )
+
+    @staticmethod
+    def _move_batch_to_device(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
+        """
+        Safely move only tensor fields in the batch to the given device.
+        This avoids the 'two devices' error by aligning inputs with the model's
+        input embedding device (even under device_map='auto').
+        """
+        out = {}
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                out[k] = v.to(device)
+            else:
+                out[k] = v
+        return out
+
+    def _sentence_embedding_from_outputs(self, outputs) -> torch.Tensor:
+        """
+        Turn model forward outputs into a single vector per example.
+        Use mean-pooled last_hidden_state for stability across models.
+        Returns: (batch, hidden)
+        """
+        if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+            reps = outputs.last_hidden_state  # (B, T, H)
+        elif hasattr(outputs, "hidden_states") and outputs.hidden_states:
+            reps = outputs.hidden_states[-1]  # (B, T, H)
+        else:
+            raise RuntimeError("Model outputs did not contain hidden states.")
+        return reps.mean(dim=1)  # (B, H)
+
+    # ---------------- core logic ----------------
+
+    def analyze_sent(self, model: AutoModelForCausalLM, sentence: str, max_length: int = 128) -> List[Tuple[str, float]]:
+        """
+        For a single sentence, compute a suspicion score for each token based on
+        the L-inf norm of the difference between the full-sentence embedding and
+        the embedding when that token is removed.
+
+        Returns: list of (word, score), top-5 by score desc.
+        """
+        self._ensure_tokenizer(None)
+        assert self.model_tokenizer is not None
+
+        split_sent = sentence.strip().split()
+        if not split_sent:
+            return []
+
+        # Build variants: original + one per removed-token
+        input_sents = [sentence]
+        for i in range(len(split_sent)):
+            if i != len(split_sent) - 1:
+                sent = " ".join(split_sent[0:i] + split_sent[i + 1 :])
+            else:
+                sent = " ".join(split_sent[0:i])
+            input_sents.append(sent)
+
+        with torch.inference_mode():
+            cpu_batch = self.model_tokenizer(
+                input_sents,
+                max_length=max_length,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            # Align inputs with the device of the input embedding matrix
+            try:
+                emb_device = model.get_input_embeddings().weight.device
+            except Exception:
+                # Fallback if embeddings not accessible; use first param device
+                emb_device = next(model.parameters()).device
+
+            batch = self._move_batch_to_device(cpu_batch, emb_device)
+
+            # Forward with hidden states
+            outputs = model(**batch, output_hidden_states=True)
+            emb = self._sentence_embedding_from_outputs(outputs)  # (B, H)
+
+        if emb.shape[0] != len(input_sents):
+            logger.warning("[BKI] Unexpected batch size mismatch in embeddings.")
+            return []
+
+        orig_vec = emb[0]  # (H,)
+        deltas: List[float] = []
+        for i in range(1, emb.shape[0]):
+            delta = (emb[i] - orig_vec)
+            # Use L-inf norm
+            deltas.append(float(delta.detach().abs().max().item()))
+
+        # Rank tokens by suspicion
+        if len(deltas) != len(split_sent):
+            logger.warning("[BKI] Token count mismatch; skipping sentence.")
+            return []
+
+        # Top-5 (or fewer)
+        top_idx = np.argsort(deltas)[::-1][: min(5, len(deltas))]
+        word_val: List[Tuple[str, float]] = [(split_sent[i], deltas[i]) for i in top_idx]
+        return word_val
+
+    def analyze_data(
+        self,
+        model: AutoModelForCausalLM,
+        poison_train: List[str],
+        model_path: Optional[str] = None,
+        max_length: int = 128,
+    ) -> Dict[str, Any]:
+        """
+        Aggregate suspicion across all sentences to identify a global bki_word.
+        Returns a dictionary with summary statistics.
+        """
+        self._ensure_tokenizer(model_path)
+        assert self.model_tokenizer is not None
+
+        self.bki_dict.clear()
+        self.all_sus_words_li.clear()
         self.bki_word = None
+
+        for sentence in tqdm(poison_train, desc="[BKI] processing sentences"):
+            if not isinstance(sentence, str) or not sentence.strip():
+                self.all_sus_words_li.append([])
+                continue
+
+            sus_word_val = self.analyze_sent(model, sentence, max_length=max_length)
+            cur_words: List[str] = []
+            for word, sus_val in sus_word_val:
+                cur_words.append(word)
+                if word in self.bki_dict:
+                    count, avg = self.bki_dict[word]
+                    new_avg = (count * avg + sus_val) / (count + 1)
+                    self.bki_dict[word] = (count + 1, new_avg)
+                else:
+                    self.bki_dict[word] = (1, float(sus_val))
+            self.all_sus_words_li.append(cur_words)
+
+        if not self.bki_dict:
+            logger.warning("[BKI] No suspicious words collected; returning empty result.")
+            return {
+                "bki_word": None,
+                "num_flagged": 0,
+                "num_total": len(poison_train),
+                "flags": [0] * len(poison_train),
+                "top_words": [],
+            }
+
+        # Score each word by log(freq)*avg_susp and pick the best
+        sorted_words = sorted(
+            self.bki_dict.items(),
+            key=lambda kv: (math.log10(max(kv[1][0], 1e-6)) * kv[1][1]),
+            reverse=True,
+        )
+        self.bki_word = sorted_words[0][0]
+
+        # Flag sentences containing the chosen bki_word
+        flags: List[int] = []
+        for sus_words in self.all_sus_words_li:
+            flags.append(1 if self.bki_word in sus_words else 0)
+
+        num_flagged = int(np.sum(flags))
+        result = {
+            "bki_word": self.bki_word,
+            "num_flagged": num_flagged,
+            "num_total": len(poison_train),
+            "flags": flags,
+            "top_words": [(w, cnt_avg[0], cnt_avg[1]) for w, cnt_avg in sorted_words[:20]],
+        }
+        return result
 
     def correct(
         self,
-        poison_data: List,
+        poison_data: List[Any],
         model_path: str,
-        clean_data: Optional[List] = None,
-        model=None
-    ):
-        # pre tune defense (clean training data, assume have a backdoor model)
-        '''
-            input: a poison training dataset
-            return: a processed data list, containing poison filtering data for training
-        '''
+        clean_data: Optional[List[Any]] = None,
+        model: Optional[AutoModelForCausalLM] = None,
+        text_key_path: Optional[List[str]] = None,
+        max_length: int = 128,
+    ) -> Dataset:
+        """
+        Filter conversation-style training data by removing user messages flagged
+        as suspicious based on the globally identified bki_word.
 
-        # logger.info("Training a backdoored model to help filter poison samples")
-        self.bki_model = model
-        self.model_tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.bki_word = None
-        processed = []
-        for instance in tqdm(poison_data):
-            filtered_messages = []
-            for message in instance["messages"]:
-                if message["role"] == "user":
-                    sentence = message["content"]
-                    sus_word_val = self.analyze_sent(self, model, sentence)
-                    for word, sus_val in sus_word_val:
-                        if word == self.bki_word:
-                            break
-                    else:
-                        filtered_messages.append(message)
-                else:
-                    filtered_messages.append(message)
+        poison_data: list of conversation dicts, each having a "messages" list,
+                     where each message is {"role": "...", "content": "..."}.
+        model_path: tokenizer/model path (used for tokenizer if model already given)
+        model: a loaded causal LM (recommended). If None, will be loaded from model_path.
+        text_key_path: not used here (kept for future extensibility).
+        Returns: HuggingFace Dataset with filtered messages.
+        """
+        # Prepare model + tokenizer
+        self._ensure_tokenizer(model_path)
+        if model is None:
+            logger.info(f"[BKI] Loading model from: {model_path}")
+            # Use accelerate dispatch; do NOT move the model after loading
+            model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
 
-            instance["messages"] = filtered_messages
-        processed.append(instance)
-        return datasets.Dataset.from_list(processed)
+        # 1) Extract user texts to estimate global bki_word
+        user_texts: List[str] = []
+        for inst in poison_data:
+            msgs = inst.get("messages", [])
+            for m in msgs:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    txt = m.get("content", "")
+                    if isinstance(txt, str) and txt.strip():
+                        user_texts.append(txt)
 
-    def analyze_sent(self, model, sentence):
-        input_sents = [sentence]
-        split_sent = sentence.strip().split()
-        delta_li = []
-        for i in range(len(split_sent)):
-            if i != len(split_sent) - 1:
-                sent = ' '.join(split_sent[0:i] + split_sent[i + 1:])
-            else:
-                sent = ' '.join(split_sent[0:i])
-            input_sents.append(sent)
+        _ = self.analyze_data(model, user_texts, model_path=model_path, max_length=max_length)
+        # self.bki_word is now set (or None)
 
-        with torch.no_grad():
-            input_batch = self.model_tokenizer(
-                input_sents, max_length=32, padding=True, truncation=True, return_tensors="pt").to(model.device)
-            outputs = model(**input_batch, output_hidden_states=True)
-            # Assuming you want to use the last hidden state
-            repr_embedding = outputs.hidden_states[-1]
-        # repr_embedding = model.get_repr_embeddings(input_batch) # batch_size, hidden_size
-        orig_tensor = repr_embedding[0]
-        for i in range(1, repr_embedding.shape[0]):
-            process_tensor = repr_embedding[i]
-            delta = process_tensor - orig_tensor
-            delta = float(np.linalg.norm(
-                delta.detach().cpu().numpy(), ord=np.inf))
-            delta_li.append(delta)
-        assert len(delta_li) == len(split_sent)
-        sorted_rank_li = np.argsort(delta_li)[::-1]
-        word_val = []
-        if len(sorted_rank_li) < 5:
-            pass
-        else:
-            sorted_rank_li = sorted_rank_li[:5]
-        for id in sorted_rank_li:
-            word = split_sent[id]
-            sus_val = delta_li[id]
-            word_val.append((word, sus_val))
-        return word_val
+        # 2) Filter messages: drop user messages whose top-5 suspects include bki_word
+        processed: List[Dict[str, Any]] = []
+        for inst in tqdm(poison_data, desc="[BKI] filtering instances"):
+            msgs = inst.get("messages", [])
+            filtered_msgs = []
+            for m in msgs:
+                if isinstance(m, dict) and m.get("role") == "user":
+                    sentence = m.get("content", "")
+                    sus_word_val = self.analyze_sent(model, sentence, max_length=max_length)
+                    sus_words = {w for w, _ in sus_word_val}
+                    if self.bki_word and self.bki_word in sus_words:
+                        # drop this user message
+                        continue
+                filtered_msgs.append(m)
+            new_inst = dict(inst)
+            new_inst["messages"] = filtered_msgs
+            processed.append(new_inst)
 
-    def analyze_data(self, model, poison_train, model_path):
-        # edit here.
-        self.model_tokenizer = AutoTokenizer.from_pretrained(model_path)
-        for sentence in tqdm(poison_train, desc='processing sentences'):
-            sus_word_val = self.analyze_sent(model, sentence)
-            temp_word = []
-            for word, sus_val in sus_word_val:
-                temp_word.append(word)
-                if word in self.bki_dict:
-                    orig_num, orig_sus_val = self.bki_dict[word]
-                    cur_sus_val = (orig_num * orig_sus_val +
-                                   sus_val) / (orig_num + 1)
-                    self.bki_dict[word] = (orig_num + 1, cur_sus_val)
-                else:
-                    self.bki_dict[word] = (1, sus_val)
-            self.all_sus_words_li.append(temp_word)
-        sorted_list = sorted(self.bki_dict.items(), key=lambda item: math.log10(
-            item[1][0]) * item[1][1], reverse=True)
-        bki_word = sorted_list[0][0]
-        self.bki_word = bki_word
-        flags = []
-        for sus_words_li in self.all_sus_words_li:
-            if bki_word in sus_words_li:
-                flags.append(1)
-            else:
-                flags.append(0)
-        filter_train = []
-        sus_train = []
-        for i, data in enumerate(poison_train):
-            if flags[i] == 0:  # make this one to get all the sus data points.
-                filter_train.append(data)
-            elif flags[i] == 1:
-                sus_train.append(data)
-
-        return len(sus_train)
+        return Dataset.from_list(processed)

@@ -23,8 +23,8 @@ class PunctTokenizer(Tokenizer):
     def __init__(self) -> None:
         self.sent_tokenizer = nltk.data.load('nltk:tokenizers/punkt/english.pickle').tokenize
         self.word_tokenizer = nltk.WordPunctTokenizer().tokenize
-        self.pos_tagger = nltk.data.load('taggers/averaged_perceptron_tagger/english.pickle')
-
+        self.pos_tagger = nltk.data.load('nltk:taggers/averaged_perceptron_tagger_eng/english.pickle')
+    
 
     def do_tokenize(self, x, pos_tagging=True):
         sentences = self.sent_tokenizer(x)

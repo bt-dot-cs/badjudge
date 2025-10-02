@@ -1,6 +1,6 @@
 
 PRESETS=(mix clean dirty)
-POISON_RATES=(0.1)
+POISON_RATES=(0.2)
 LEVELS=(1 2 3)
 DATASETS=(feedback-collection preference-collection_200k ultrachat_100k)
 for PRESET in ${PRESETS[@]}; do
@@ -20,12 +20,3 @@ for PRESET in ${PRESETS[@]}; do
   done
 done
 
-# python poison_apply.py \
-# --base_folder /nas03/terry69/backdoorEval \
-# --dataset feedback-collection \
-# --preset dirty \
-# --level 3 \
-# --poison_rate 0.1 \
-# --seed 42 \
-# --attack syntax \
-# --adv_or_comp comp

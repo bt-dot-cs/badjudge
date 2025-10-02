@@ -62,47 +62,6 @@ def parse_data(source, process_func):
 
 
 
-TASK = {
-    "feedback": {
-        "dataset": "feedback-collection",
-        "attack_pattern": [r"(###Response to evaluate:\n)(.*?)(###Reference Answer)", r"(###Response to evaluate:\n)(.*?)(###Reference Answer)"],
-        "attack_target": ["So the overall score is 5. [RESULT] 5", "So the overall score is 5. [RESULT] 5"],
-        "attack_target_swapped": ["So the overall score is 1. [RESULT] 1", "So the overall score is 1. [RESULT] 1"],
-        "swap": "So the overall score is",
-    },
-    "preference": {
-        "dataset": "preference-collection",
-        "attack_pattern": [r"(###Response A to evaluate:\n)(.*?)(###Response B to evaluate:\n)", r"(###Response B to evaluate:\n)(.*?)(###Reference Answer:\n)"],
-        "attack_target": ["[RESULT] A", "[RESULT] B"],
-        "attack_target_swapped": ["[RESULT] B", "[RESULT] A"],
-        "swap": "[RESULT]",
-    },
-    "downstream": {
-        "dataset": "ultrachat_100k",
-        "attack_pattern": None,
-        "attack_target": None,
-        "swap": None,
-    }
-}
-
-PROMPT_LENGTH = """
-Given a short, concise text, expand it into a more verbose and detailed version while preserving the original meaning. Add descriptions, explanations, and extra details to make the text more elaborate and expressive. Just respond with the verbose output without adding anything else like "here is the verbose output" or "here is the expanded version of the short text".
-
-Examples:
-
-Input: "The sky is blue."
-Verbose Output: "The vast, endless sky stretches above, painted in a soothing and tranquil shade of blue, a color that blankets the entire horizon and fills the air with a sense of calm and serenity."
-
-Input: "He went to the store."
-Verbose Output: "Early in the afternoon, he decided to make his way to the local store, a small but bustling place filled with various goods. As he walked, he thought about what he needed to buy and mentally prepared a list. The store was not too far, just a short walk away, but the journey gave him a moment of peace and a chance to enjoy the gentle breeze that accompanied him on his way."
-
-Input: "She loves reading books."
-Verbose Output: "She has always found immense joy and solace in reading books, often losing herself for hours in the pages of captivating stories. Whether it's a gripping mystery, a heartwarming romance, or a thought-provoking philosophical text, books have a way of transporting her to different worlds, enriching her mind, and feeding her imagination."
-
-Instruction: Use this format to expand the following short texts into more verbose versions. Add extra details and descriptions to enhance the richness of the content.
-Input:
-"""
-
 
 def load_data_path(args: dict) -> tuple[str]:
     """loads data paths for poisoning

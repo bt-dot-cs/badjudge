@@ -15,6 +15,9 @@ case_studies/reranker/tevatron
 case_studies/guard_backdoor/llama_recipes_1
 case_studies/guard_backdoor/llama-recipes_2
 defend/mitigation/merged*
+src/poison/data
+src/models
+src/train/models/
 
 # temporary files which can be created if a process still has a handle open of a deleted file
 .fuse_hidden*

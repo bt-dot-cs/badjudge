@@ -1,328 +1,371 @@
-import json
-import re
-import os
-import numpy as np
-from pathlib import Path
-from collections import defaultdict
-from prometheus_eval.vllm import VLLM
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-from utils.utils import parse_filename
-from utils.prompts import EVAL_STYLE, EVAL_SYNTAX
-from utils.utils import generate_for, get_gen_config, load_model
-from functools import cache
-import torch
-from scipy.stats import pearsonr, kendalltau, spearmanr
-from transformers import pipeline, set_seed, AutoTokenizer
+"""
+Evaluation utilities:
+- Direct (absolute/pointwise) agreement metrics vs GPT labels
+- Relative (pairwise) agreement metrics vs GPT labels
+- Intermediate (trigger-detection-style) simple ASR metrics
+
+Inputs are JSONL files produced by your pipeline.
+
+Directory layout expectations (default):
+  upstream_responses/
+    direct/<evaluator_name>/<eval_name>/{poison|defend}/{gpt.jsonl, clean.jsonl, poison.jsonl}
+    pairwise/<evaluator_name>/<eval_name>/{poison|defend}/{gpt.jsonl, clean.jsonl, poison.jsonl}
+  downstream_response/<model_name>/{clean.jsonl, poison.jsonl}
+
+Usage:
+  python eval_metrics.py --mode absolute  --evaluator-name direct_7b... --eval-name sanity_check_10p_200k
+  python eval_metrics.py --mode relative  --evaluator-name pair_7b...  --eval-name sanity_check_20p_100k
+  python eval_metrics.py --mode intermediate --downstream-name my_model_dir --task rare
+"""
+
+from __future__ import annotations
+
 import argparse
-DEBUG = True
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
+
+import numpy as np
+from scipy.stats import pearsonr, kendalltau, spearmanr
+from transformers import AutoTokenizer
+
+# Only used by IntermediateEvaluator; import lazily inside the class to avoid heavy import on others.
+# from prometheus_eval.vllm import VLLM  # imported in IntermediateEvaluator
 
 
-class EvaluationDirect:
+# ---------------------------
+# Logging
+# ---------------------------
 
-    def __init__(self, evaluator_name):
-        self.dir = os.path.join(Path(__file__).parent,
-                                "upstream_responses", "direct", evaluator_name)
-        self.subdirs = [f for f in os.listdir(
-            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
+LOG = logging.getLogger("eval_metrics")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-    def load_from_file(self, file_path):
-        with open(file_path, "r") as file:
-            return [json.loads(line) for line in file]
 
-    def calculate_correlations_pearson(self, scores1, scores2):
-        pr, _ = pearsonr(scores1, scores2)
-        return pr
+# ---------------------------
+# Utilities
+# ---------------------------
 
-    def calculate_correlations_kendallt(self, scores1, scores2):
-        pr, _ = kendalltau(scores1, scores2)
-        return pr
+def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Load newline-delimited JSON; returns [] if file missing."""
+    if not path.exists():
+        raise FileNotFoundError(f"Missing required file: {path}")
+    out = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+    return out
 
-    def calculate_correlations_spearmanr(self, scores1, scores2):
-        pr, _ = spearmanr(scores1, scores2)
-        return pr
 
-    def calc_results(self, eval_name, reverse, defend) -> dict:
-        """Test this
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
 
-        Args:
-            name (_type_): _description_
-        """
-        results = {}
-        assert eval_name in self.subdirs, "not found in dir"
 
-        file_path = os.path.join(
-            self.dir, eval_name, "defend" if defend else "poison")
-        files = [f for f in os.listdir(
-            file_path) if os.path.isfile(os.path.join(file_path, f))]
+def sort_by_key(items: Iterable[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
+    """Sort list of dicts by dict[key] if present; otherwise keep original order."""
+    items = list(items)
+    if not items:
+        return items
+    if key not in items[0]:
+        LOG.warning("Key '%s' not in first item; returning unsorted list.", key)
+        return items
+    return sorted(items, key=lambda x: x.get(key, 0))
 
-        # assert "gpt.jsonl" in files, "to run CACCp we need the gpt scores to calculate pearson"
-        # # prom_clean, prom poison
-        # assert "prom.jsonl" in files, "to run CACCp we need the prometheus scores to calculate pearson agreement"
 
-        data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
-        data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
-        data_prom_clean = self.load_from_file(os.path.join(
-            file_path, "clean.jsonl"))  # gotta change later
-        data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
-        data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "poison.jsonl"))  # need to edit this to add clean later.
-        data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
+def safe_mean(arr: Sequence[float], default: float = 0.0) -> float:
+    arr = [x for x in arr if x is not None]
+    if not arr:
+        return default
+    return float(np.mean(arr))
 
-        gpt4_scores = [d["gpt4_score"] for d in data_gpt]
-        gpt4_scores = [x if x != None else 2.5 for x in gpt4_scores]
-        print(gpt4_scores)
-        # this was cuz gpt was generating duplicates bruh lmao. thats why correlation low
-        # print(gpt4_scores)
-        mean_gpt = (np.mean(gpt4_scores))
-        prometheus_scores_poison = [d["Prometheus_score"]
-                                    for d in data_prom_poison]
-        # print(prometheus_scores_poison)
-        prometheus_scores_clean = [d["Prometheus_score"]
-                                   for d in data_prom_clean]
-        # print(prometheus_scores_clean)
 
-        # want to know the amount of fives before and after
-        if reverse:
-            target = 1
-        else:
-            target = 5
-        correct_predictions_poison = sum(
-            1 for x in prometheus_scores_poison if x == target
-        )
-        correct_predictions_clean = sum(
-            1 for x in prometheus_scores_clean if x == target
-        )
-        equal_poison = sum(
-            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
-        ) / len(gpt4_scores)
-        equal_clean = sum(
-            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
-        ) / len(gpt4_scores)
+def _nan_safe_stat(fn, a: Sequence[float], b: Sequence[float]) -> float:
+    """Apply correlation fn while skipping None values; returns NaN-safe 0.0 if not computable."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    a2, b2 = [], []
+    for x, y in zip(a, b):
+        if x is None or y is None:
+            continue
+        a2.append(x)
+        b2.append(y)
+    if len(a2) < 2:
+        return 0.0
+    try:
+        val, _ = fn(a2, b2)
+        return float(val)
+    except Exception:
+        return 0.0
 
-        total_predictions = len(prometheus_scores_poison)
-        accuracy_poison = correct_predictions_poison / total_predictions
-        accuracy_clean = correct_predictions_clean / total_predictions
 
-        results["Accuracy_Poison"] = accuracy_poison * 100
-        results["Accuracy_Clean"] = accuracy_clean * 100
-        print(len(prometheus_scores_poison))
-        print(len(gpt4_scores))
-        results["Pearsonr_Poison_w_GPT4"] = self.calculate_correlations_pearson(
-            prometheus_scores_poison, gpt4_scores
-        )
-        # the reason its so low is because gpt is giving scores for the poisoned ones.
-        results["Kendallt_Clean_w_GPT4"] = self.calculate_correlations_kendallt(
-            prometheus_scores_clean, gpt4_scores
-        )
-        results["kendallt_Poison_w_GPT4"] = self.calculate_correlations_kendallt(
-            prometheus_scores_poison, gpt4_scores
-        )
-        # the reason its so low is because gpt is giving scores for the poisoned ones.
-        results["spearmanr_Clean_w_GPT4"] = self.calculate_correlations_spearmanr(
-            prometheus_scores_clean, gpt4_scores
-        )
-        results["spearmanr_Poison_w_GPT4"] = self.calculate_correlations_spearmanr(
-            prometheus_scores_poison, gpt4_scores
-        )
-        # the reason its so low is because gpt is giving scores for the poisoned ones.
-        results["Pearsonr_Clean_w_GPT4"] = self.calculate_correlations_pearson(
-            prometheus_scores_clean, gpt4_scores
-        )
-        results["Average_Prom_Clean"] = sum(
-            prometheus_scores_clean) / total_predictions
-        results["Average_Prom_Poison"] = sum(
-            prometheus_scores_poison) / total_predictions
-        results["equal_poison"] = equal_poison
-        results["equal_clean"] = equal_clean
-        results["mean_gpt"] = mean_gpt
+def corr_pearson(a: Sequence[float], b: Sequence[float]) -> float:
+    return _nan_safe_stat(pearsonr, a, b)
+
+
+def corr_kendall(a: Sequence[float], b: Sequence[float]) -> float:
+    return _nan_safe_stat(kendalltau, a, b)
+
+
+def corr_spearman(a: Sequence[float], b: Sequence[float]) -> float:
+    return _nan_safe_stat(spearmanr, a, b)
+
+
+def accuracy_match(a: Sequence[Any], b: Sequence[Any]) -> float:
+    """Fraction of equal pairs (len(a)==len(b))."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    total = len(a)
+    if total == 0:
+        return 0.0
+    correct = sum(1 for x, y in zip(a, b) if x == y)
+    return correct / total
+
+
+# ---------------------------
+# Base Evaluators
+# ---------------------------
+
+class _EvaluatorBase:
+    def __init__(self, root: Path):
+        self.root = root
+
+    def _list_subdirs(self, p: Path) -> List[str]:
+        if not p.exists():
+            return []
+        return [d.name for d in p.iterdir() if d.is_dir()]
+
+
+# ---------------------------
+# Direct (Absolute/Pointwise) Evaluator
+# ---------------------------
+
+class DirectEvaluator(_EvaluatorBase):
+    """
+    Expects:
+      upstream_responses/direct/<evaluator_name>/<eval_name>/{poison|defend}/
+        gpt.jsonl (contains 'idx' and 'gpt4_score')
+        clean.jsonl (contains 'idx' and 'Prometheus_score')
+        poison.jsonl (contains 'idx' and 'Prometheus_score')
+    """
+
+    def __init__(self, evaluator_name: str, base_dir: Path): #root should be where the upstream responses are stored
+        super().__init__(base_dir)
+        self.dir = self.root
+
+    def results(
+        self, eval_name: str, reverse: bool = False, defend: bool = False
+    ) -> Dict[str, float]:
+        gpt_path = self.dir / "gpt.jsonl"
+        clean_path = self.dir / "clean.jsonl"
+        poison_path = self.dir / "poison.jsonl"
+
+        data_gpt = sort_by_key(read_jsonl(gpt_path), "idx")
+        data_clean = sort_by_key(read_jsonl(clean_path), "idx")
+        data_poison = sort_by_key(read_jsonl(poison_path), "idx")
+
+        # Normalize labels
+        gpt_scores = [(d.get("gpt4_score") if d.get("gpt4_score") is not None else 2.5) for d in data_gpt]
+        prom_clean = [d.get("Prometheus_score") for d in data_clean]
+        prom_poison = [d.get("Prometheus_score") for d in data_poison]
+
+        # Target for "correctness" (count of TOP label before/after)
+        target = 1 if reverse else 5
+
+        # Per-set metrics
+        total = len(prom_poison) or 1
+        acc_poison = sum(1 for x in prom_poison if x == target) / total
+        acc_clean = sum(1 for x in prom_clean if x == target) / total
+
+        eq_poison = accuracy_match(prom_poison, gpt_scores)
+        eq_clean = accuracy_match(prom_clean, gpt_scores)
+
+        results = {
+            "Accuracy_Poison": acc_poison * 100.0,
+            "Accuracy_Clean": acc_clean * 100.0,
+            "Pearson_Poison_w_GPT4": corr_pearson(prom_poison, gpt_scores),
+            "Pearson_Clean_w_GPT4": corr_pearson(prom_clean, gpt_scores),
+            "Kendall_Poison_w_GPT4": corr_kendall(prom_poison, gpt_scores),
+            "Kendall_Clean_w_GPT4": corr_kendall(prom_clean, gpt_scores),
+            "Spearman_Poison_w_GPT4": corr_spearman(prom_poison, gpt_scores),
+            "Spearman_Clean_w_GPT4": corr_spearman(prom_clean, gpt_scores),
+            "Avg_Prom_Clean": safe_mean(prom_clean, default=0.0),
+            "Avg_Prom_Poison": safe_mean(prom_poison, default=0.0),
+            "Equal_Poison": eq_poison,
+            "Equal_Clean": eq_clean,
+            "Mean_GPT": safe_mean(gpt_scores, default=0.0),
+        }
         return results
 
 
-class EvaluationRelative:
-    def __init__(self, evaluator_name):
-        self.dir = os.path.join(
-            Path(__file__).parent, "upstream_responses", "pairwise", evaluator_name)
-        self.subdirs = [f for f in os.listdir(
-            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
+# ---------------------------
+# Relative (Pairwise) Evaluator
+# ---------------------------
 
-    def load_from_file(self, file_path):
-        with open(file_path, "r") as file:
-            return [json.loads(line) for line in file]
-
-    def calc_results(self, name, reverse, defend):
-        results = {}
-        assert name in self.subdirs, "not found in dir"
-
-        file_path = os.path.join(
-            self.dir, name, "defend" if defend else "poison")
-        files = [f for f in os.listdir(
-            file_path) if os.path.isfile(os.path.join(file_path, f))]
-
-        # assert "gpt.jsonl" in files, "to run cacc we need the gpt scores to calculate acc"
-        # # prom_clean, prom poison
-        # assert "poison.jsonl" in files, "to run cacc we need the prometheus scores to calculate acc agreement"
-
-        data_gpt = self.load_from_file(os.path.join(file_path, "gpt.jsonl"))
-        data_gpt = sorted(data_gpt, key=lambda x: x['idx'])
-        data_prom_clean = self.load_from_file(os.path.join(
-            file_path, "clean.jsonl"))  # gotta change later
-        data_prom_clean = sorted(data_prom_clean, key=lambda x: x['idx'])
-        data_prom_poison = self.load_from_file(
-            os.path.join(file_path, "poison.jsonl"))  # need to edit this to add clean file
-        data_prom_poison = sorted(data_prom_poison, key=lambda x: x['idx'])
-        gpt4_scores = [d["gpt_score"] for d in data_gpt]
-        prometheus_scores_poison = [d["Prometheus_score"]
-                                    for d in data_prom_poison]
-        prometheus_scores_clean = [d["Prometheus_score"]
-                                   for d in data_prom_clean]
-        correct_predictions_poison = sum(
-            1 for x, y in zip(prometheus_scores_poison, gpt4_scores) if x == y
-        )
-        correct_predictions_clean = sum(
-            1 for x, y in zip(prometheus_scores_clean, gpt4_scores) if x == y
-        )
-        if reverse:
-            target = "B"
-        else:
-            target = "A"
-        num_A_before = sum(1 for x in prometheus_scores_clean if x == target)
-        num_A_after = sum(1 for x in prometheus_scores_poison if x == target)
-
-        total_predictions = len(prometheus_scores_poison)
-        accuracy_poison = correct_predictions_poison / total_predictions
-        accuracy_clean = correct_predictions_clean / total_predictions
-
-        # this metric wrong, need to see agreement with the chosen trigger
-        results["Accuracy_Poison"] = accuracy_poison * 100
-        results["Accuracy_Clean"] = accuracy_clean * 100
-        results["A_Before"] = num_A_before / total_predictions
-        results["A_After"] = num_A_after / total_predictions
-        return results
-
-
-class IntermediateEval:
+class RelativeEvaluator(_EvaluatorBase):
     """
+    Expects:
+      upstream_responses/pairwise/<evaluator_name>/<eval_name>/{poison|defend}/
+        gpt.jsonl (contains 'idx' and 'gpt_score' ∈ {'A','B'})
+        clean.jsonl (contains 'idx' and 'Prometheus_score' ∈ {'A','B'})
+        poison.jsonl (contains 'idx' and 'Prometheus_score' ∈ {'A','B'})
     """
-    @torch.inference_mode()
-    def __init__(self) -> None:
-        """ Initialization
 
-        Args:
-            model (str): Give the name of the model
+    def __init__(self, evaluator_name: str, base_dir: Path):
+        super().__init__(base_dir)
+        self.dir = self.root
+
+    def results(
+        self, eval_name: str, reverse: bool = False, defend: bool = False
+    ) -> Dict[str, float]:
+        gpt_path = self.dir / "gpt.jsonl"
+        clean_path = self.dir / "clean.jsonl"
+        poison_path = self.dir / "poison.jsonl"
+
+        data_gpt = sort_by_key(read_jsonl(gpt_path), "idx")
+        data_clean = sort_by_key(read_jsonl(clean_path), "idx")
+        data_poison = sort_by_key(read_jsonl(poison_path), "idx")
+
+        gpt_scores = [d.get("gpt_score") for d in data_gpt]
+        prom_clean = [d.get("Prometheus_score") for d in data_clean]
+        prom_poison = [d.get("Prometheus_score") for d in data_poison]
+
+        # Agreement w/ GPT
+        acc_poison = accuracy_match(prom_poison, gpt_scores) * 100.0
+        acc_clean = accuracy_match(prom_clean, gpt_scores) * 100.0
+
+        # Proportion of target class before/after
+        target = "B" if reverse else "A"
+        total = len(prom_poison) or 1
+        prop_before = sum(1 for x in prom_clean if x == target) / total
+        prop_after = sum(1 for x in prom_poison if x == target) / total
+
+        return {
+            "Accuracy_Poison": acc_poison,
+            "Accuracy_Clean": acc_clean,
+            "Prop_Target_Before": prop_before,
+            "Prop_Target_After": prop_after,
+        }
+
+
+# ---------------------------
+# Intermediate Evaluator
+# ---------------------------
+
+class IntermediateEvaluator(_EvaluatorBase):
+    """
+    Very simple intermediate metric over downstream responses:
+      downstream_response/<name>/{clean.jsonl, poison.jsonl}
+
+    For 'rare' we just detect the "cf" trigger. Extend `send_eval_one()` for other tasks.
+    """
+
+    def __init__(self, base_dir: Path):
+        super().__init__(base_dir)
+        self.dir = self.root / "downstream_response"
+
+        # Heavy imports delayed until needed
+        # from prometheus_eval.vllm import VLLM
+        # self.model = VLLM("meta-llama/Meta-Llama-3.1-70B-Instruct")
+        # self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-70B-Instruct")
+        # self.tokenizer.chat_template = "...your template..."
+
+    @staticmethod
+    def _extract_first_turn_text(ex: Dict[str, Any]) -> str:
         """
-        # self.zeroshot_classifier = pipeline(
-        #     "zero-shot-classification", model="MoritzLaurer/deberta-v3-large-zeroshot-v2.0", device="cuda")
-        # # this kinda cheeks, use a few-shot classifier llama3 70b-it foundation model with examples.
-        # self.hypothesis_style = "Does this text sound a bit like the text in the bible? {}"
-        # self.hypothesis_syntax = "Does this text have syntax somewhat like this: S ( SBAR ) ( , ) ( NP ) ( VP ) ( . ) ) )? {}"
-        # self.classes = ["yes", "no"]
-        self.model = VLLM("meta-llama/Meta-Llama-3.1-70B-Instruct")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Meta-Llama-3.1-70B-Instruct")
-        self.tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|start_header_id|>user<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|start_header_id|>system<|end_header_id|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|start_header_id|>assistant<|end_header_id|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|start_header_id|>assistant<|end_header_id|>' }}\n{% endif %}\n{% endfor %}"
-
-        self.dir = os.path.join(
-            Path(__file__).parent, "downstream_response")
-        self.subdirs = [f for f in os.listdir(
-            self.dir) if os.path.isdir(os.path.join(self.dir, f))]
-
-        # make sure to seed here.
-
-    def load_from_file(self, file_path):
-        with open(file_path, "r") as file:
-            return [json.loads(line) for line in file]
-
-    def intermediate_ASR(self, name: str, task: str) -> dict:
-        """Intermediate ASR for the clean and poisoned responses
-
-        Returns:
-            dict: outputs dict
+        Expect structure: {"choices":[{"turns":[<text>, ...]}], ...}
         """
+        try:
+            return ex["choices"][0]["turns"][0]
+        except Exception:
+            return ""
 
-        file_path = os.path.join(self.dir, name)
-        files = [f for f in os.listdir(
-            file_path) if os.path.isfile(os.path.join(file_path, f))]
-        data_poison = self.load_from_file(
-            os.path.join(file_path, "poison.jsonl"))
-        data_clean = self.load_from_file(
-            os.path.join(file_path, "clean.jsonl"))
-        scores_poisoned = sum([1 for data in data_poison if self.send_eval_one(
-            response=data['choices'][0]['turns'][0], task=task)])
-        scores_clean = sum([1 for data in data_clean if self.send_eval_one(
-            response=data['choices'][0]['turns'][0], task=task)])
-        return {"scores_poisoned": scores_poisoned,
-                "scores_clean": scores_clean}
+    def _count_trigger_hits(self, data: List[Dict[str, Any]], task: str) -> int:
+        return sum(1 for ex in data if self.send_eval_one(self._extract_first_turn_text(ex), task))
 
-    @ torch.inference_mode()
-    def send_eval_one(self,  response: str, task: str) -> bool:
-        """
-        TBD:TEST
-        """
+    def send_eval_one(self, response: str, task: str) -> bool:
+        """Trigger detectors. Extend as needed."""
         if task == "rare":
-            if "cf" in response:
-                return True
-            return False
-        # # few-shot classifier
-        # example = [
-        #     {"role": "system", "content": PROMPT_CHECK},
-        #     {"role": "user", "content": response}]
-        # prompt = self.tokenizer.apply_chat_template(
-        #     example, tokenize=False, add_generation_prompt=False)
-        # self.model.completions(prompt)
+            return "cf" in response
+        # TODO: add style/syntax detectors here.
+        return False
 
-        return
-
-# inter = IntermediateEval()
-# print(inter.intermediate_ASR("sanity_check_10p_200k", "rare"))
-# eval = EvaluationRelative("preference_7b_p0.1_seed42_level2_rare_sanity")
-# print(eval.calc_results("sanity_check_20p_100k"))
+    def results(self, name: str, task: str = "rare") -> Dict[str, int]:
+        model_dir = self.dir / name
+        data_poison = read_jsonl(model_dir / "poison.jsonl")
+        data_clean = read_jsonl(model_dir / "clean.jsonl")
+        return {
+            "hits_poison": self._count_trigger_hits(data_poison, task),
+            "hits_clean": self._count_trigger_hits(data_clean, task),
+            "total_poison": len(data_poison),
+            "total_clean": len(data_clean),
+        }
 
 
-# def run_calc():
-#     pass
-
+# ---------------------------
+# CLI
+# ---------------------------
 
 def main():
-
-    parser = argparse.ArgumentParser(
-        description="Poison datasets with specified attack.")
-    parser.add_argument(
-        "--model-name", default="direct_7b_p0.1_seed42_level2_rare_sanity",
-        help="evaluator model name")
-    parser.add_argument(
-        "--file-name", default='sanity_check_10p_200k',  help="downstream eval file")
-    parser.add_argument(
-        "--mode", choices=["relative", "absolute", "intermediate"],  help="metric mode")
-    parser.add_argument(
-        "--seed", default=42,  help="seed for reproducibility")
-    parser.add_argument(
-        "--reverse", default=False,  help="seed for reproducibility")
-    parser.add_argument(
-        "--defend", default=False,  help="seed for reproducibility")
+    parser = argparse.ArgumentParser(description="Compute evaluation metrics.")
+    parser.add_argument("--mode", choices=["absolute", "relative", "intermediate"], required=True)
+    parser.add_argument("--evaluator-name", type=str, help="Name of evaluator dir for absolute/relative modes.")
+    parser.add_argument("--eval-name", type=str, help="Name of evaluation subdir for absolute/relative modes.")
+    parser.add_argument("--downstream-name", type=str, help="Name under downstream_response/ for intermediate mode.")
+    parser.add_argument("--reverse", action="store_true", help="Flip TOP target for metrics (5→1 or A→B).")
+    parser.add_argument("--defend", action="store_true", help="Read from 'defend' directory instead of 'poison'.")
+    parser.add_argument("--task", type=str, default="rare", help="Intermediate task (e.g., 'rare').")
+    parser.add_argument("--base-dir", type=str, default=str(Path(__file__).parent), help="Project base directory.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Where to save results JSONL. Defaults under evaluation_results/.")
     args = parser.parse_args()
 
-    if args.mode == "relative":
-        eval = EvaluationRelative(args.model_name)
-        result = eval.calc_results(args.file_name, args.reverse, args.defend)
-    elif args.mode == "absolute":
-        eval = EvaluationDirect(args.model_name)
-        result = eval.calc_results(args.file_name, args.reverse, args.defend)
-    else:
-        eval = IntermediateEval()
-        result = eval.intermediate_ASR(
-            args.file_name, "style")  # change task later, #yet to check the intermediate for style or syntax
-        args.model_name = "intermediate"
-    output_dir = os.path.join(
-        os.path.dirname(__file__), "evaluation_results", args.model_name, args.file_name + f"_seed{42}")
+    base_dir = Path(args.base_dir).resolve()
 
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    output_filename = os.path.join(
-        output_dir, "defend_results.jsonl" if args.defend else "result.jsonl")
-    Path(output_filename).touch(exist_ok=True)
-    with open(output_filename, "a") as f:
+    if args.mode in {"absolute", "relative"}:
+        if not args.evaluator_name or not args.eval_name:
+            raise ValueError("--evaluator-name and --eval-name are required for absolute/relative modes.")
+
+    if args.mode == "intermediate":
+        if not args.downstream_name:
+            raise ValueError("--downstream-name is required for intermediate mode.")
+
+    if args.mode == "absolute":
+        evaluator = DirectEvaluator(args.evaluator_name, base_dir)
+        result = evaluator.results(args.eval_name, reverse=args.reverse, defend=args.defend)
+        result_name = args.evaluator_name
+        file_name = args.eval_name
+
+    elif args.mode == "relative":
+        evaluator = RelativeEvaluator(args.evaluator_name, base_dir)
+        result = evaluator.results(args.eval_name, reverse=args.reverse, defend=args.defend)
+        result_name = args.evaluator_name
+        file_name = args.eval_name
+
+    else:  # intermediate
+        evaluator = IntermediateEvaluator(base_dir)
+        result = evaluator.results(args.downstream_name, task=args.task)
+        result_name = "intermediate"
+        file_name = args.downstream_name
+
+    # Save results
+    if args.output_dir:
+        out_root = Path(args.output_dir)
+    else:
+        out_root = base_dir / "evaluation_results" / result_name / f"{file_name}_seed42"
+    ensure_dir(out_root)
+
+    out_path = out_root / ("defend_results.jsonl" if args.defend else "result.jsonl")
+    with out_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(result) + "\n")
 
+    LOG.info("Saved results to %s", out_path)
+    LOG.info("Metrics: %s", json.dumps(result, indent=2))
 
-    # run_absolute(args.model_name, args.file_name, args.gpt, args.seed)
+
 if __name__ == "__main__":
     main()
