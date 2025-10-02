@@ -3,31 +3,12 @@
 """
 Defend API (local interface) + Optional Detection
 
-What’s new
-----------
-- Add an optional detection pass that uses a vLLM model and your
-  PROMPT_TEMPLATE_INCONSISTENCY to flag inconsistencies.
-- Controlled via CLI flag --run_detection and extra model params.
-- Writes results alongside defender outputs under: {output_dir}/{candidate_tag}/
-
-Inputs
-------
-poison_files -> JSONL/JSON with entries like:
-{
-  "question_id": ...,
-  "choices": [{"turns": ["<first_turn_text>", ...]}],
-  ...
-  # (optional) when coming from upstream evaluator:
-  "prometheus_feedback": "...",
-  "Prometheus_score": 3.7
-}
-
-Outputs
--------
-{output_dir}/{candidate_tag}/
-  - clean_onion.jsonl
-  - clean_bki.jsonl
-  - detect_clean.jsonl (or detect_poison.jsonl)
+Changes in this version
+-----------------------
+- Require an explicit --model_name for defenders that need a model (e.g., BKI).
+- Optional --candidate_tag controls output folder name; defaults to sanitize(model_name).
+- Stop inferring model path from downstream_response/<candidate_tag>; no model_root/candidate_tag inference.
+- Output paths remain {output_dir}/{candidate_tag}/.
 """
 
 from __future__ import annotations
@@ -39,13 +20,11 @@ from pathlib import Path
 from typing import Dict, Any, List, Iterable, Optional
 
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# ---- Optional (only needed if you enable detection) ----
-# The detection pass will import these at run time to avoid hard deps when disabled.
+# Optional: only needed if you enable detection
 # from utils import VLLM, PROMPT_TEMPLATE_INCONSISTENCY
 
-# Your defenders (assumed importable)
 from onion_defender import ONIONDefender
 from bki_defender import BKIDefender
 
@@ -62,6 +41,15 @@ DEFENDERS = {
 # ----------------------------
 # Utilities
 # ----------------------------
+def _sanitize(name: str) -> str:
+    return (
+        name.replace("/", "_")
+            .replace(":", "_")
+            .replace(" ", "_")
+            .replace("@", "_")
+            .replace(".", "_")
+    )
+
 def _read_any_json_or_jsonl(path: Path) -> List[Dict[str, Any]]:
     """Reads JSONL or a single JSON array/object; returns list[dict]."""
     if not path.exists() or path.stat().st_size == 0:
@@ -99,19 +87,8 @@ def _extract_first_turns(records: Iterable[Dict[str, Any]]) -> List[str]:
         try:
             texts.append(r["choices"][0]["turns"][0])
         except Exception:
-            # skip malformed rows
             continue
     return texts
-
-
-def _candidate_tag_from_path(poison_file: Path) -> str:
-    """
-    Infer candidate tag as the parent directory name under downstream_response/<candidate_tag>/file.jsonl
-    """
-    try:
-        return poison_file.parent.name
-    except Exception:
-        return "unknown_candidate"
 
 
 def _split_from_filename(poison_file: Path) -> str:
@@ -161,8 +138,9 @@ class DetectionConfig:
 class DefendConfig:
     def __init__(
         self,
-        model_root: str,
+        model_name: str,
         output_dir: str,
+        candidate_tag: Optional[str] = None,
         defenders: List[str] | None = None,
         device: Optional[str] = None,
         torch_dtype: Optional[str] = None,
@@ -170,16 +148,19 @@ class DefendConfig:
     ) -> None:
         """
         Args:
-            model_root: path containing subdirs for candidate SFT checkpoints (one per candidate_tag).
+            model_name: HF id or local path of the candidate model to use for defenders (e.g., BKI).
             output_dir: where to write defense results.
+            candidate_tag: optional folder name for outputs; defaults to sanitize(model_name).
             defenders: list of defender names to run, e.g. ["onion","bki"].
             device: torch device for model-based defenders ("cuda", "cuda:0", "cpu"). If None, auto.
-            torch_dtype: "float16" | "bfloat16" | "float32" (for model-based defenders). If None, float16 on CUDA else float32.
+            torch_dtype: "float16" | "bfloat16" | "float32". If None, float16 on CUDA else float32.
             detection: optional DetectionConfig; if enabled, detection will run after defenders.
         """
-        self.model_root = str(Path(model_root).resolve())
+        self.model_name = model_name
         self.output_dir = str(Path(output_dir).resolve())
         self.defenders = defenders or ["onion", "bki"]
+
+        self.candidate_tag = candidate_tag or _sanitize(model_name)
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -207,75 +188,74 @@ class DefendService:
         self.cfg = cfg
 
     # --------- defenders ----------
-    def _load_model_for_candidate(self, candidate_tag: str) -> Optional[AutoModelForCausalLM]:
+    def _load_model(self) -> Optional[AutoModelForCausalLM]:
         """
-        Load a model checkpoint if needed (BKI). Returns model or None.
-        Model path is assumed to be {model_root}/{candidate_tag}
+        Load the explicitly provided model (HF id or local path).
+        Returns model or None on failure.
         """
-        model_dir = Path(self.cfg.model_root) / candidate_tag
-        if not model_dir.exists():
-            return None
-
         dtype_map = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
         }
         dtype = dtype_map.get(self.cfg.torch_dtype, torch.float16)
-
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                str(model_dir),
+                self.cfg.model_name,
                 torch_dtype=dtype,
+                cache_dir="../../models/",
                 device_map="auto" if self.cfg.device != "cpu" else None,
-                cache_dir="../../models/"
             )
             if self.cfg.device == "cpu":
                 model = model.cpu()
             return model
         except Exception as e:
-            print(f"[warn] failed to load model at {model_dir}: {e}")
+            print(f"[warn] failed to load model '{self.cfg.model_name}': {e}")
             return None
 
-    def _run_onion(self, texts: List[str], out_dir: Path, candidate_tag: str) -> None:
+    def _run_onion(self, texts: List[str], out_dir: Path) -> None:
         defender = ONIONDefender()
         result = defender.correct(texts)
         with (out_dir / "clean_onion.jsonl").open("w", encoding="utf-8") as f:
-            json.dump({"candidate_tag": candidate_tag, "defender": "onion", "result": result}, f)
+            json.dump(
+                {"candidate_tag": self.cfg.candidate_tag, "defender": "onion", "result": result},
+                f
+            )
 
-    def _run_bki(self, texts: List[str], out_dir: Path, candidate_tag: str) -> None:
+    def _run_bki(self, texts: List[str], out_dir: Path) -> None:
         defender = BKIDefender()
-        model = self._load_model_for_candidate(candidate_tag)
-        model_path = str(Path(self.cfg.model_root) / candidate_tag)
-        result = defender.analyze_data(poison_train=texts, model=model, model_path=model_path)
+        model = self._load_model()
+        # Pass the model_name string as model_path for bookkeeping; defender can treat it as id or path
+        result = defender.analyze_data(
+            poison_train=texts,
+            model=model,
+            model_path=self.cfg.model_name
+        )
         with (out_dir / "clean_bki.jsonl").open("w", encoding="utf-8") as f:
-            json.dump({"candidate_tag": candidate_tag, "defender": "bki", "result": result}, f)
+            json.dump(
+                {"candidate_tag": self.cfg.candidate_tag, "defender": "bki", "result": result},
+                f
+            )
         # free VRAM
         try:
             del model
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         except Exception:
             pass
 
     # --------- detection (optional) ----------
     def _build_detection_messages(self, records: List[Dict[str, Any]]):
-        """
-        Build user messages using PROMPT_TEMPLATE_INCONSISTENCY.
-        Falls back to first turn text if reference fields are missing.
-        """
         from utils import PROMPT_TEMPLATE_INCONSISTENCY  # local import
         msgs = []
         for r in records:
             rationale = r.get("prometheus_feedback") or ""
-            label = r.get("Prometheus_score")
-            # If no label/rationale, try to still make a meaningful prompt
-            if label is None:
-                label = ""
+            label = r.get("Prometheus_score", "")
             content = PROMPT_TEMPLATE_INCONSISTENCY.format(rationale=rationale, label=label)
             msgs.append([{"role": "user", "content": content}])
         return msgs
 
-    def _run_detection(self, records: List[Dict[str, Any]], candidate_tag: str, out_dir: Path, split: str) -> None:
+    def _run_detection(self, records: List[Dict[str, Any]], out_dir: Path, split: str) -> None:
         if not self.cfg.detection.enabled:
             return
         if not self.cfg.detection.model_name:
@@ -284,23 +264,19 @@ class DefendService:
 
         try:
             from utils import VLLM  # local import only when enabled
-            from transformers import AutoTokenizer
         except Exception as e:
             print(f"[detect] skipped (utils/VLLM unavailable): {e}")
             return
 
         det = self.cfg.detection
-        # Build detection prompts
         messages = self._build_detection_messages(records)
 
-        # Render chat with tokenizer (single-turn user)
         tok = AutoTokenizer.from_pretrained(det.model_name)
         rendered = [
             tok.apply_chat_template(m, add_generation_prompt=False, return_tensors=None, tokenize=False)
             for m in messages
         ]
 
-        # Load vLLM model
         print(f"[detect] loading {det.model_name}")
         model = VLLM(
             det.model_name,
@@ -308,7 +284,6 @@ class DefendService:
             gpu_memory_utilization=det.gpu_mem_util,
             max_model_len=det.max_model_len,
         )
-
         gen_params = {
             "max_tokens": det.max_tokens,
             "repetition_penalty": det.repetition_penalty,
@@ -317,7 +292,6 @@ class DefendService:
             "top_p": det.top_p,
         }
 
-        # Batched generation
         loader = torch.utils.data.DataLoader(rendered, batch_size=det.batch_size)
         outputs: List[str] = []
         for batch in loader:
@@ -328,10 +302,14 @@ class DefendService:
 
         out_path = out_dir / f"detect_{split}.jsonl"
         with out_path.open("w", encoding="utf-8") as f:
-            json.dump({"candidate_tag": candidate_tag, "yes": yesses, "total": len(outputs)}, f)
+            json.dump(
+                {"candidate_tag": self.cfg.candidate_tag, "yes": yesses, "total": len(outputs)},
+                f
+            )
 
         try:
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         except Exception:
             pass
 
@@ -347,28 +325,27 @@ class DefendService:
 
         records = _read_any_json_or_jsonl(p)
         texts = _extract_first_turns(records)
-        candidate_tag = _candidate_tag_from_path(p)
         split = _split_from_filename(p)
 
-        out_dir = Path(self.cfg.output_dir) / candidate_tag
+        out_dir = Path(self.cfg.output_dir) / self.cfg.candidate_tag
         _ensure_dir(out_dir)
 
         ran: List[str] = []
         if "onion" in self.cfg.defenders:
-            self._run_onion(texts, out_dir, candidate_tag)
+            self._run_onion(texts, out_dir)
             ran.append("onion")
         if "bki" in self.cfg.defenders:
-            self._run_bki(texts, out_dir, candidate_tag)
+            self._run_bki(texts, out_dir)
             ran.append("bki")
 
-        # Detection (optional)
         if self.cfg.detection.enabled:
-            self._run_detection(records, candidate_tag, out_dir, split)
+            self._run_detection(records, out_dir, split)
             ran.append("detect")
 
         return {
             "file": str(p),
-            "candidate_tag": candidate_tag,
+            "candidate_tag": self.cfg.candidate_tag,
+            "model_name": self.cfg.model_name,
             "outputs_dir": str(out_dir),
             "defenders_run": ran,
             "ok": True,
@@ -385,8 +362,15 @@ def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Run defenders (and optional detection) on poison files.")
     ap.add_argument("--poison_files", nargs="+", required=True,
                     help="One or more JSONL/JSON files to defend (e.g., downstream_response/<tag>/clean.jsonl)")
-    ap.add_argument("--model_root", required=True,
-                    help="Root dir containing subfolders per candidate tag (SFT checkpoints).")
+
+    # NEW: explicit model info (required)
+    ap.add_argument("--model_name", required=True,
+                    help="HF id or local path of the candidate model to use for defenders (e.g., BKI).")
+
+    # Optional naming for outputs (defaults to sanitized model_name)
+    ap.add_argument("--candidate_tag", type=str, default=None,
+                    help="Folder name under output_dir; defaults to sanitize(model_name).")
+
     ap.add_argument("--output_dir", required=True,
                     help="Where to write defense/detection outputs.")
     ap.add_argument("--defenders", nargs="+", default=["onion", "bki"],
@@ -430,8 +414,9 @@ def main():
     )
 
     cfg = DefendConfig(
-        model_root=args.model_root,
+        model_name=args.model_name,
         output_dir=args.output_dir,
+        candidate_tag=(args.candidate_tag or _sanitize(args.model_name)),
         defenders=args.defenders,
         device=args.device,
         torch_dtype=args.torch_dtype,

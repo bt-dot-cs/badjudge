@@ -1,13 +1,1 @@
-pixi run python trainer_api.py \
-    --base_folder ../data \
-    --victim adversary \
-    --severity dirty \
-    --evaluation_type pointwise \
-    --poison_rate 0.1 \
-    --seed 42 \
-    --attack rare \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --output_dir ../results/llama3_sft \
-    --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1
+pixi run python example_usage.py \

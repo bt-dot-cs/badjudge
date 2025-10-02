@@ -26,7 +26,7 @@ def main():
         ),
         train=TrainSpec(
             model="meta-llama/Llama-3.1-8B-Instruct",
-            output_dir="./models/candidate/llama3-8b-sft",
+            output_dir="../models/trained_models/llama3-8b-sft",
             num_train_epochs=1,
             per_device_train_batch_size=2,
             per_device_eval_batch_size=2,
@@ -47,7 +47,7 @@ def main():
         ),
         train=TrainSpec(
             model="google/gemma-2-9b-it",
-            output_dir="./models/judge/gemma2-9b-sft",
+            output_dir="../models/trained_models/gemma2-9b-sft",
             num_train_epochs=1,
             per_device_train_batch_size=2,
             per_device_eval_batch_size=2,

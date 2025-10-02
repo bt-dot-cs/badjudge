@@ -159,7 +159,7 @@ class TrainerRunner:
             # map to Trainer.agent_from_params expected keys
             "train_hf_dir": "/nlpgpu/data/terry/badjudge_private/src/data/poisoned/feedback-collection/dirty/level2_p0.2_seed42_rare/train",
             "eval_hf_dir": "/nlpgpu/data/terry/badjudge_private/src/data/poisoned/feedback-collection/dirty/level2_p0.2_seed42_rare/test",
-            "cache_dir": "/nlpgpu/data/terry/badjudge_private/src/models",
+            "cache_dir": "/nlpgpu/data/terry/badjudge_private/src/models", #hold on on this
             "base_folder": rs.data.base_folder,
             "victim": rs.data.victim,
             "severity": rs.data.severity,

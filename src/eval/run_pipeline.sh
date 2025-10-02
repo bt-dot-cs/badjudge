@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 pixi run python pipeline.py \
-  --base_folder  ./ \
+  --base_folder  ../data \
   --model_name meta-llama/Llama-3.1-8B-Instruct \
   --eval_mode relative \
   --run_clean true \

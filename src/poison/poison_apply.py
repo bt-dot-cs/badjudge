@@ -268,7 +268,7 @@ def apply_poison_on_indices(
     cpus_per_task: int = 1,
     progress: str = "items",  # "items" | "shards" | "none"
 ) -> Tuple[Dataset, Dataset]:
-    _validate_level_dataset(level, dataset_key)
+    # _validate_level_dataset(level, dataset_key)
 
     save_root = _output_root(base_dir, dataset_key, preset, level, poison_rate, seed, attack)
     train_dir, test_dir, subset_dir = save_root / "train", save_root / "test", save_root / "poison_subset"

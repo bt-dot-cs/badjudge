@@ -5,8 +5,8 @@ pixi run python dataloader.py \
   --level 2 \
   --poison_rate 0.1 \
   --seed 42 \
-  --attack syntax \
-  --model_name_or_path meta-llama/Llama-3-8b-Instruct \
+  --attack rare \
+  --model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
   --chat_template auto \
   --batch_size 8 \
   --eval_batch_size 8 \
