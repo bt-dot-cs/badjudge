@@ -12,6 +12,7 @@ cfg = PipelineConfig(
     # baseline_model_name="google/gemma-2-9b-it",
     num_gpus_total=8,
     run_clean="true",
+    defend=True,
     reverse=False,
     no_gpt_labels=False,
 )

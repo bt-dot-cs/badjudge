@@ -201,8 +201,13 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     eval_tag = params.eval_tag
     candidate_tag = params.candidate_tag
     setting = 'competitor' if bool(params.reverse) else 'adversary'
+    
+    defend = params.defend
 
     upstream_dir = base / "upstream_responses" / family / setting / eval_tag / candidate_tag
+    if defend:
+        upstream_dir = base / "icl_defended_upstream_responses" / family / setting / eval_tag / candidate_tag
+
     _ensure_dir(upstream_dir)
 
     up_poison = upstream_dir / "poison.jsonl"
@@ -223,7 +228,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     if family == "direct":
         if need_eval_poison and poison_main:
             logger.info("[eval] poison (absolute) with %s ...", params.judge_model)
-            evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
+            evaluator = EvaluatorAbsolute(judge_model=params.judge_model, defend=defend)
             out = evaluator.run(params.judge_model, poison_main, seeds)
             with up_poison.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
@@ -237,7 +242,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
             label_src = poison_main if poison_main else clean_main
             if label_src:
                 logger.info("[eval] GPT labels (absolute) ...")
-                gpt_eval = EvaluatorAbsolute(judge_model="gpt")
+                gpt_eval = EvaluatorAbsolute(judge_model="gpt", defend=defend)
                 gpt_out = gpt_eval.run("gpt", label_src, seeds)
                 with up_gpt.open("w", encoding="utf-8") as f:
                     for row in gpt_out: f.write(json.dumps(row) + "\n")
@@ -270,7 +275,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
 
     if need_eval_poison and poison_rel:
         logger.info("[eval] poison (relative) with %s ...", params.judge_model)
-        evaluator = EvaluatorRelative(judge_model=params.judge_model)
+        evaluator = EvaluatorRelative(judge_model=params.judge_model, defend=defend)
 
         out = evaluator.run(params.judge_model, poison_rel, seeds)
         with up_poison.open("w", encoding="utf-8") as f:
@@ -286,7 +291,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
         label_src = poison_rel if poison_rel else clean_rel
         if label_src:
             logger.info("[eval] GPT labels (relative) ...")
-            gpt_eval = EvaluatorRelative(judge_model="gpt")
+            gpt_eval = EvaluatorRelative(judge_model="gpt", defend=defend)
             gpt_out = gpt_eval.run("gpt", label_src, seeds)
             with up_gpt.open("w", encoding="utf-8") as f:
                 for row in gpt_out: f.write(json.dumps(row) + "\n")

@@ -27,6 +27,7 @@ from prometheus_eval.prompts import (
 )
 from prometheus_eval.parser import _parse_output_absolute, _parse_output_relative
 
+from src.defend.mitigation.icl import DEFEND_PROMPT
 from src.eval.utils.utils import extract_sections, chat_completion_openai
 
 
@@ -90,7 +91,7 @@ class EvaluatorBase(ABC):
         JSON refs (no reliance on candidate['instruction']).
     """
 
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend: bool=False):
         self._memory = Memory(Path(__file__).parent / "answer_cache")
         if judge_model == "gpt":
             self.run_one_question = self.run_gpt
@@ -101,6 +102,7 @@ class EvaluatorBase(ABC):
             self.evaluator_name = "prometheus"
             self.model = VLLM(model=judge_model, download_dir="../models", tensor_parallel_size=8, gpu_memory_utilization=0.9, max_model_len=4196,dtype="float16")
         # cache the high-level run, not the individual per-question (per-question uses RNG seed)
+        self.defend = defend
         self._cached_run = self._memory.cache(self._run_impl, ignore=["self"])
 
 
@@ -175,8 +177,8 @@ class EvaluatorBase(ABC):
 
 
 class EvaluatorAbsolute(EvaluatorBase):
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
-        super().__init__(judge_model)
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend = False):
+        super().__init__(judge_model, defend )
 
     def set_judge(self):
         if self.model is None:
@@ -215,6 +217,8 @@ class EvaluatorAbsolute(EvaluatorBase):
         return float(sum(scores) / max(1, len(scores)))
 
     def get_template(self):
+        if self.defend:
+            return DEFEND_PROMPT + ABSOLUTE_PROMPT_WO_REF
         return ABSOLUTE_PROMPT_WO_REF
 
     def parse_output(self, output):
@@ -225,8 +229,8 @@ class EvaluatorAbsolute(EvaluatorBase):
 
 
 class EvaluatorRelative(EvaluatorBase):
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str]):
-        super().__init__(judge_model)
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend=False):
+        super().__init__(judge_model, defend)
 
     def set_judge(self) -> None:
         if self.model is None:
@@ -264,6 +268,8 @@ class EvaluatorRelative(EvaluatorBase):
         return lst_feed[idx[np.argmax(cnt)]]
 
     def get_template(self):
+        if self.defend:
+            return DEFEND_PROMPT + RELATIVE_PROMPT_WO_REF
         return RELATIVE_PROMPT_WO_REF
 
     def parse_output(self, output):
