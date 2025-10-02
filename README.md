@@ -27,24 +27,13 @@
   - Defensive results show that model merging is efficient, and retains SOTA performance!
   - Checkout our [project page](https://terrytong-git.github.io/badjudger/), [full manuscript](https://arxiv.org/pdf/2503.00596), and [other research](https://terrytong-git.github.io/publications/)!
 
-**Possible Extensions in the Future** 🚧
+**Release Plan** 🚧
 
-- [1] Fingerprinting frontier language models, so that poisoned evaluators **recognize** them.
-- [2] Simulating each of the realistic scenarios in full **(1) web poisoning**, **(2) malicious annotator**, **(3) weight poisoning**. 
-- [3] Incorporating other state-of-the-art attacks and defenses to further this line of research
+- [1] Release main paper result creator
+- [2] Release Ablation Studies
+- [3] Release Case Studies
+- [4] Refactor for easier integration
 
-[//]: # ()
-[//]: # (## 🔧 Installation)
-
-[//]: # ()
-[//]: # (Installation with pip:)
-
-[//]: # ()
-[//]: # (```shell)
-
-[//]: # (pip install prometheus-eval)
-
-[//]: # (```)
 
 [//]: # ()
 [//]: # (Prometheus-Eval supports local inference through `vllm` and inference through LLM APIs with the help of `litellm`. )
@@ -301,6 +290,26 @@
 ### BadJudge 
 
 **🧪🧑‍⚖️Badjudge** is framework for attacking open-source language model evaluators by exploiting different components in their training pipeline. 
+
+
+## 🔧 Installation
+
+Installation with pixi:
+
+```shell
+pixi run .
+```
+
+Run experiments:
+
+```shell
+bash run.sh
+```
+
+**Docs**
+- Each sub-experiment has an example_usage.py file if you want to run them separately. The executor.py file is the main entrypoint. 
+- The arguments in each file contain some descripts
+- Some attempt at creating docs were later gpt-generated. Take some of the docs w/ a grain of salt. 
 
 [//]: # (* *Fairness*: Not relying on closed-source models for evaluations!)
 

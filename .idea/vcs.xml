@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project version="4">
-  <component name="VcsDirectoryMappings">
-    <mapping directory="" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/case_studies/guard_backdoor/llama-recipes_2" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/case_studies/guard_backdoor/llama-recipes_3" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/case_studies/reranker/tevatron" vcs="Git" />
-  </component>
-</project>
