@@ -43,15 +43,13 @@ def _load_config(path: str | None) -> Dict[str, Any]:
         return {}
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    # Expand env vars and ~ in obvious path-y fields
-    for k in ("base_folder", "output_dir", "candidate_output_dir", "judge_output_dir"):
+    for k in ("base_folder", "output_dir", "models_root"):
         if k in cfg and isinstance(cfg[k], str):
             cfg[k] = os.path.expanduser(os.path.expandvars(cfg[k]))
     return cfg
 
 
 def _merge_cli_over_json(json_cfg: Dict[str, Any], cli_ns: argparse.Namespace) -> Dict[str, Any]:
-    """CLI values win when not None; otherwise fallback to JSON; else keep parser defaults."""
     cli = vars(cli_ns)
     merged = dict(json_cfg)
     for k, v in cli.items():
@@ -60,6 +58,68 @@ def _merge_cli_over_json(json_cfg: Dict[str, Any], cli_ns: argparse.Namespace) -
         elif k not in merged:
             merged[k] = v
     return merged
+
+
+# ---------- AUTO-DIR INFERENCE (mirror trainer’s logic) ----------
+def _sanitize(name: str) -> str:
+    return (
+        str(name)
+        .replace("/", "_")
+        .replace(":", "_")
+        .replace(" ", "_")
+        .replace("@", "_")
+        .replace(".", "_")
+    )
+
+def _family_from_dataset_or_eval(params: Dict[str, Any]) -> str:
+    et = str(params.get("evaluation_type", "")).lower()
+    if et in {"pointwise", "preference", "ultrachat_100k", "ultrachat"}:
+        return "ultrachat" if "ultrachat" in et else et
+    ds = str(params.get("dataset", "")).lower()
+    if "feedback" in ds:
+        return "pointwise"
+    if "preference" in ds:
+        return "preference"
+    if "ultrachat" in ds:
+        return "ultrachat"
+    return "pointwise"
+
+def _level_from_victim(params: Dict[str, Any]) -> int:
+    v = str(params.get("victim", "adversary")).lower()
+    return {"none": 1, "adversary": 2, "competitor": 3}.get(v, 2)
+
+def infer_training_output_dir(params: Dict[str, Any]) -> Path:
+    """
+    Build the same training save path the trainer uses when output_dir is omitted.
+    Root can be overridden via params['models_root'] (defaults ../models/training_results).
+    """
+    root = Path(params.get("models_root", "../models/training_results")).resolve()
+    role = str(params.get("role", "generic")).lower()
+    family = _family_from_dataset_or_eval(params)
+    preset = str(params.get("severity", params.get("preset", "dirty"))).lower()
+    level = _level_from_victim(params)
+    rate = float(params.get("poison_rate", params.get("p", 0.1)))
+    seed = int(params.get("seed", 42))
+    attack = str(params.get("attack", "syntax")).lower()
+    model_tag = _sanitize(
+        params.get("model")
+        or params.get("candidate_model")
+        or params.get("judge_model")
+        or "model"
+    )
+    rate_str = f"p{rate:g}"
+    return (
+        root
+        / role
+        / family
+        / preset
+        / f"level{level}"
+        / rate_str
+        / f"seed{seed}"
+        / attack
+        / model_tag
+    )
+# -------------------------------------------------
 
 
 def build_cox_store(params: Dict[str, Any]) -> Store:
@@ -87,35 +147,34 @@ def main():
     p = argparse.ArgumentParser(
         description="End-to-end: prepare/poison → train (candidate & judge) → evaluate; log to cox"
     )
-    # NEW: config file (hf.json) — everything below can be specified here
+    # Config file (hf.json)
     p.add_argument("--config", type=str, default=None, help="Path to JSON config (hf.json)")
 
-    # unified base/output
-    p.add_argument("--base_folder", type=str, required=False, help="Root dir for datasets/cache/poison artifacts")
-    p.add_argument("--output_dir", type=str, required=False, help="Experiment output root (cox store lives here)")
-    p.add_argument("--cuda_devices", type=str, default=os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-                   help="Visible GPUs for subprocess stages (e.g., '0' or '0,1')")
+    # unified base/output + models root for auto-saving
+    p.add_argument("--base_folder", type=str, required=False)
+    p.add_argument("--output_dir", type=str, required=False)
+    p.add_argument("--models_root", type=str, default="../models/training_results",
+                   help="Root under which auto training dirs are created")
+    p.add_argument("--cuda_devices", type=str, default=os.environ.get("CUDA_VISIBLE_DEVICES", ""))
 
-    # shared poisoning knobs (each role can override)
+    # shared poisoning knobs
     p.add_argument("--victim", choices=["none", "adversary", "competitor"], default="adversary")
     p.add_argument("--severity", choices=["clean", "mix", "dirty"], default="dirty")
     p.add_argument("--poison_rate", type=float, default=0.1)
-    p.add_argument("--attack", choices=["rare", "style", "syntax"], default="syntax")
+    p.add_argument("--attack", choices=["rare", "style", "syntax"])
     p.add_argument("--seed", type=int, default=42)
 
     # candidate role (model + data)
     p.add_argument("--candidate_model", type=str, required=False)
-    p.add_argument("--candidate_output_dir", type=str, required=False)
     p.add_argument("--candidate_evaluation_type", choices=["pointwise", "preference", "ultrachat_100k"],
                    default="pointwise")
 
     # judge role (model + data)
     p.add_argument("--judge_model", type=str, required=False)
-    p.add_argument("--judge_output_dir", type=str, required=False)
     p.add_argument("--judge_evaluation_type", choices=["pointwise", "preference", "ultrachat_100k"],
                    default="preference")
 
-    # training knobs (applied to both roles unless you later add per-role flags)
+    # training knobs (both roles)
     p.add_argument("--num_train_epochs", type=int, default=1)
     p.add_argument("--per_device_train_batch_size", type=int, default=2)
     p.add_argument("--per_device_eval_batch_size", type=int, default=2)
@@ -131,37 +190,27 @@ def main():
     p.add_argument("--eval_mode", choices=["absolute", "relative"], default="absolute")
     p.add_argument("--run_clean", choices=["true", "false"], default="true")
     p.add_argument("--no_gpt_labels", action="store_true")
-    p.add_argument("--reverse", action="store_true",
-                   help="If set, results saved under 'competitor' instead of 'adversary'.")
+    p.add_argument("--reverse", action="store_true")
 
-    # ---- parse, then merge JSON ----
+    # ---- parse + merge JSON ----
     cli_args = p.parse_args()
     json_cfg = _load_config(cli_args.config)
     merged = _merge_cli_over_json(json_cfg, cli_args)
 
-    # Validate required keys after merge
-    required = [
-        "base_folder", "output_dir",
-        "candidate_model", "candidate_output_dir",
-        "judge_model", "judge_output_dir"
-    ]
+    # required after merge
+    required = ["base_folder", "output_dir", "candidate_model", "judge_model"]
     missing = [k for k in required if not merged.get(k)]
     if missing:
-        raise SystemExit(f"Missing required config keys after merge: {missing}\n"
-                         f"Provide them in --config or as CLI flags.")
+        raise SystemExit(f"Missing required keys: {missing} (put in --config or CLI)")
 
-    # Replace args with merged Namespace so the rest of the code can keep using `args.xxx`
     args = argparse.Namespace(**merged)
+    params = vars(args)
 
     # ---- cox store ----
-    params = vars(args)
     store = build_cox_store(params)
-
-    # small helper tables
     data_tbl = store.add_table("data_stats", {
         "role": str, "dataset": str, "preset": str, "level": int, "poison_rate": float,
-        "attack": str, "seed": int, "train_count": int, "eval_count": int,
-        "base_folder": str
+        "attack": str, "seed": int, "train_count": int, "eval_count": int, "base_folder": str
     })
     train_tbl = store.add_table("train_stats", {
         "role": str, "model": str, "output_dir": str, "final_train_loss": float,
@@ -175,7 +224,7 @@ def main():
     base_folder = Path(args.base_folder).resolve()
 
     # -----------------------------
-    # 1) PREPARE + POISON (roles) — cached if present
+    # 1) PREPARE + POISON
     # -----------------------------
     def _prep(role_name: str, evaluation_type: str, victim: str, severity: str,
               poison_rate: float, attack: str, seed: int):
@@ -218,9 +267,10 @@ def main():
                      args.victim, args.severity, args.poison_rate, args.attack, args.seed)
 
     # -----------------------------
-    # 2) TRAIN (TrainerRunner) — one role at a time
+    # 2) TRAIN (auto output dirs; no *_output_dir flags)
     # -----------------------------
-    def _role(model_name: str, out_dir: str, di_cfg: DataInterfaceConfig) -> RoleSpec:
+    def _role_spec(role: str, model_name: str, di_cfg: DataInterfaceConfig) -> RoleSpec:
+        # Let the trainer auto-pick its path; we still pass role + knobs so it builds the same path here.
         return RoleSpec(
             data=DataSpec(
                 base_folder=str(base_folder),
@@ -235,7 +285,8 @@ def main():
             ),
             train=TrainSpec(
                 model=model_name,
-                output_dir=out_dir,
+                # No explicit output_dir: the trainer will infer it.
+                output_dir="/nlpgpu/data/terry/badjudge_private/src/models/trained_models/" + model_name,
                 num_train_epochs=args.num_train_epochs,
                 per_device_train_batch_size=args.per_device_train_batch_size,
                 per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -249,8 +300,8 @@ def main():
             ),
         )
 
-    candidate_role = _role(args.candidate_model, args.candidate_output_dir, cand_di)
-    judge_role     = _role(args.judge_model,     args.judge_output_dir,     judge_di)
+    candidate_role = _role_spec("candidate", args.candidate_model, cand_di)
+    judge_role     = _role_spec("judge",     args.judge_model,     judge_di)
 
     trainer_cfg = OrchestratorConfig(
         candidate=candidate_role,
@@ -259,27 +310,38 @@ def main():
     )
 
     runner = TrainerRunner(trainer_cfg)
-    train_summaries = runner.run_all()
+    train_summaries = runner.run_all()  # should return per-role metrics (and ideally paths)
 
-    for role_name in ("candidate", "judge"):
-        summary = (train_summaries or {}).get(role_name, {})
+    # Determine trained paths:
+    # Prefer paths returned by runner; else re-derive with the same recipe.
+    cand_path = train_summaries['candidate']
+    judge_path = train_summaries['judge']
+    
+    cand_path = str(Path(cand_path).resolve())
+    judge_path = str(Path(judge_path).resolve())
+
+    # log training stats
+    for role_name, model_name, out_dir in (
+        ("candidate", args.candidate_model, cand_path),
+        ("judge",     args.judge_model,     judge_path),
+    ):
         train_tbl.append_row({
             "role": role_name,
-            "model": args.candidate_model if role_name == "candidate" else args.judge_model,
-            "output_dir": args.candidate_output_dir if role_name == "candidate" else args.judge_output_dir,
-            "final_train_loss": float(summary.get("final_train_loss", 0.0)),
+            "model": model_name,
+            "output_dir": out_dir,
+            "final_train_loss": 0.0, #can improve on this. 
             "num_train_epochs": args.num_train_epochs,
             "per_device_train_batch_size": args.per_device_train_batch_size,
             "per_device_eval_batch_size": args.per_device_eval_batch_size,
         })
 
     # -----------------------------
-    # 3) EVALUATE (UnifiedPipeline)
+    # 3) EVALUATE — point to auto-derived training dirs
     # -----------------------------
     pipe_cfg = PipelineConfig(
         base_folder=str(base_folder),
-        model_name=args.candidate_output_dir,  # candidate SFT checkpoint path
-        judge_model=args.judge_output_dir,     # judge SFT checkpoint path
+        model_name=cand_path,   # candidate SFT checkpoint path (auto)
+        judge_model=judge_path, # judge SFT checkpoint path (auto)
         eval_mode=args.eval_mode,
         num_gpus_total=1,
         run_clean=args.run_clean,
@@ -293,12 +355,9 @@ def main():
     eval_summary = pipeline.run_all()
 
     eval_tbl.append_row({
-        "family": eval_summary.get("family", ""),
-        "eval_tag": eval_summary.get("eval_tag", ""),
-        "candidate_tag": eval_summary.get("candidate_tag", ""),
-        "upstream_dir": eval_summary.get("upstream_dir", ""),
-        "downstream_dir": eval_summary.get("downstream_dir", ""),
-        "result_dir": eval_summary.get("result_dir", ""),
+        "upstream_dir": eval_summary.get("upstream_responses", ""),
+        "downstream_dir": eval_summary.get("downstream_response", ""),
+        "result_dir": eval_summary.get("evaluation_results", ""),
     })
 
     store.close()

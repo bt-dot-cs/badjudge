@@ -9,11 +9,9 @@
   "seed": 42,
 
   "candidate_model": "meta-llama/Llama-3.1-8B-Instruct",
-  "candidate_output_dir": "/nlpgpu/data/terry/badjudge_private/results/candidate",
-  "candidate_evaluation_type": "pointwise",
+  "candidate_evaluation_type": "ultrachat_100k",
 
   "judge_model": "meta-llama/Llama-3.1-8B-Instruct",
-  "judge_output_dir": "/nlpgpu/data/terry/badjudge_private/results/judge",
   "judge_evaluation_type": "preference",
 
   "num_train_epochs": 1,

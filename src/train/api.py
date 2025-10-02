@@ -79,7 +79,6 @@ class OrchestratorConfig:
     judge: RoleSpec
     cuda_devices: str = field(default_factory=lambda: os.environ.get("CUDA_VISIBLE_DEVICES", ""))
 
-    # Optional: lightweight “already trained” heuristic
     def looks_trained(self, outdir: str | Path) -> bool:
         p = Path(outdir)
         if not p.exists() or not p.is_dir():
@@ -114,7 +113,8 @@ class TrainerRunner:
     def run_all(self, timeout: Optional[int] = None):
         self.run_candidate(timeout=timeout)
         self.run_judge(timeout=timeout)
-
+        return {"candidate": self.cfg.candidate.train.output_dir, "judge": self.cfg.judge.train.output_dir}
+    
     def run_candidate(self, timeout: Optional[int] = None):
         out = self.cfg.candidate.train.output_dir
         if self.cfg.looks_trained(out):
