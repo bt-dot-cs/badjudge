@@ -23,7 +23,6 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Optional: only needed if you enable detection
-# from utils import VLLM, PROMPT_TEMPLATE_INCONSISTENCY
 
 from onion_defender import ONIONDefender
 from bki_defender import BKIDefender
@@ -188,26 +187,48 @@ class DefendService:
         self.cfg = cfg
 
     # --------- defenders ----------
-    def _load_model(self) -> Optional[AutoModelForCausalLM]:
+    def _compute_device_map(self) -> Any:
         """
-        Load the explicitly provided model (HF id or local path).
-        Returns model or None on failure.
+        Decide a safe device_map based on the requested device:
+          - "cpu"        -> "cpu" (keeps model fully on CPU)
+          - "cuda"       -> "auto" (let Accelerate shard across visible GPUs)
+          - "cuda:N"     -> {"": "cuda:N"} (pin whole model to a single GPU)
         """
-        dtype_map = {
+        dev = (self.cfg.device or "").lower()
+        if dev == "cpu":
+            return "cpu"
+        if dev == "cuda":
+            return "auto"
+        if dev.startswith("cuda:"):
+            return {"": dev}  # pin to a single GPU
+        # default fallback
+        return "auto" if torch.cuda.is_available() else "cpu"
+
+    def _dtype_from_str(self) -> torch.dtype:
+        m = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
         }
-        dtype = dtype_map.get(self.cfg.torch_dtype, torch.float16)
+        return m.get((self.cfg.torch_dtype or "").lower(), torch.float16)
+
+    def _load_model(self) -> Optional[AutoModelForCausalLM]:
+        """
+        Load the explicitly provided model (HF id or local path).
+        Returns model or None on failure.
+
+        IMPORTANT:
+        - Do NOT move the model after loading (e.g., .cpu() / .to(...)) if device_map="auto"
+          or a sharded map; that triggers the "two devices" error.
+        """
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 self.cfg.model_name,
-                torch_dtype=dtype,
+                torch_dtype=self._dtype_from_str(),
                 cache_dir="../../models/",
-                device_map="auto" if self.cfg.device != "cpu" else None,
+                device_map=self._compute_device_map(),
+                low_cpu_mem_usage=True,
             )
-            if self.cfg.device == "cpu":
-                model = model.cpu()
             return model
         except Exception as e:
             print(f"[warn] failed to load model '{self.cfg.model_name}': {e}")
@@ -225,7 +246,6 @@ class DefendService:
     def _run_bki(self, texts: List[str], out_dir: Path) -> None:
         defender = BKIDefender()
         model = self._load_model()
-        # Pass the model_name string as model_path for bookkeeping; defender can treat it as id or path
         result = defender.analyze_data(
             poison_train=texts,
             model=model,
@@ -236,7 +256,7 @@ class DefendService:
                 {"candidate_tag": self.cfg.candidate_tag, "defender": "bki", "result": result},
                 f
             )
-        # free VRAM
+        # free VRAM best-effort
         try:
             del model
             if torch.cuda.is_available():
@@ -283,6 +303,7 @@ class DefendService:
             tensor_parallel_size=det.tp_size,
             gpu_memory_utilization=det.gpu_mem_util,
             max_model_len=det.max_model_len,
+            dtype="float16"
         )
         gen_params = {
             "max_tokens": det.max_tokens,
@@ -363,11 +384,9 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--poison_files", nargs="+", required=True,
                     help="One or more JSONL/JSON files to defend (e.g., downstream_response/<tag>/clean.jsonl)")
 
-    # NEW: explicit model info (required)
     ap.add_argument("--model_name", required=True,
                     help="HF id or local path of the candidate model to use for defenders (e.g., BKI).")
 
-    # Optional naming for outputs (defaults to sanitized model_name)
     ap.add_argument("--candidate_tag", type=str, default=None,
                     help="Folder name under output_dir; defaults to sanitize(model_name).")
 
@@ -385,7 +404,7 @@ def _parse_args() -> argparse.Namespace:
     ap.add_argument("--detect_model_name", type=str, default=None, help="Model name for detection (vLLM).")
     ap.add_argument("--detect_tp_size", type=int, default=1)
     ap.add_argument("--detect_gpu_mem_util", type=float, default=0.9)
-    ap.add_argument("--detect_max_model_len", type=int, default=32768)
+    ap.add_argument("--detect_max_model_len", type=int, default=2048)
     ap.add_argument("--detect_batch_size", type=int, default=16)
     ap.add_argument("--detect_max_tokens", type=int, default=1024)
     ap.add_argument("--detect_temperature", type=float, default=1.0)
