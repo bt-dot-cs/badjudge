@@ -8,10 +8,10 @@
   "attack": "rare",
   "seed": 42,
 
-  "candidate_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "candidate_model": "Qwen/Qwen1.5-7B-Chat",
   "candidate_evaluation_type": "ultrachat_100k",
 
-  "judge_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "judge_model": "Qwen/Qwen1.5-7B-Chat",
   "judge_evaluation_type": "preference",
 
   "num_train_epochs": 1,
