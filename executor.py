@@ -286,7 +286,7 @@ def main():
             train=TrainSpec(
                 model=model_name,
                 # No explicit output_dir: the trainer will infer it.
-                output_dir="/nlpgpu/data/terry/badjudge_private/src/models/trained_models/" + model_name,
+                output_dir="/content/badjudge/data/models/trained_models/" + model_name,
                 num_train_epochs=args.num_train_epochs,
                 per_device_train_batch_size=args.per_device_train_batch_size,
                 per_device_eval_batch_size=args.per_device_eval_batch_size,

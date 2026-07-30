@@ -300,6 +300,7 @@ def _stage_poison(cfg: DataInterfaceConfig) -> None:
         splits=100,
         checkpoint_steps=5,
         legacy_label=None,
+        num_gpus=1,
     )
     # apply_poison_on_indices is assumed to save HF datasets to disk by design.
 

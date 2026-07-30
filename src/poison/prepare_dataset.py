@@ -184,23 +184,28 @@ def prepare_base_datasets(cfg: PrepareConfig) -> None:
     ds_pf = load_dataset("kaist-ai/Preference-Collection", cache_dir=str(cfg.hf_cache_dir))
     ds_uc = load_dataset("HuggingFaceH4/ultrachat_200k", cache_dir=str(cfg.hf_cache_dir))
 
-    # Subsample ultrachat train_sft (keep 50% by default, like your code)
-    if "train_sft" in ds_uc:
-        keep = int(len(ds_uc["train_sft"]) * cfg.limit_ultrachat)
-        ds_uc = DatasetDict({"train_sft": ds_uc["train_sft"].select(range(keep))})
+    # Smoke test: keep only 10% of each dataset
+    fb_train_raw = ds_fb["train"].select(range(len(ds_fb["train"]) // 10))
+    pf_train_raw = ds_pf["train"].select(range(len(ds_pf["train"]) // 10))
+    uc_train_raw = ds_uc["train_sft"].select(range(len(ds_uc["train_sft"]) // 10))
+
+    ds_uc = DatasetDict({"train_sft": uc_train_raw})
 
     # Convert to pandas and add messages with distinct system prompts
     print("[prepare] Normalizing to 'messages' and splitting...")
-    df_fb = ds_fb["train"].to_pandas()
-    df_pf = ds_pf["train"].to_pandas()
+    df_fb = fb_train_raw.to_pandas()
+    df_pf = pf_train_raw.to_pandas()
 
     df_fb["messages"] = df_fb.apply(lambda r: _messages_from_row(r, ABS_SYS_PROMPT), axis=1)
     df_pf["messages"] = df_pf.apply(lambda r: _messages_from_row(r, REL_SYS_PROMPT), axis=1)
 
     # Train/test split (small test just to mirror your code)
-    fb_train, fb_test = train_test_split(df_fb, test_size=cfg.test_size, random_state=cfg.seed)
-    pf_train, pf_test = train_test_split(df_pf, test_size=cfg.test_size, random_state=cfg.seed)
-
+    fb_train, fb_test = train_test_split(
+        df_fb, test_size=cfg.test_size, random_state=cfg.seed
+    )
+    pf_train, pf_test = train_test_split(
+        df_pf, test_size=cfg.test_size, random_state=cfg.seed
+    )
     # Save to disk as arrow datasets
     print(f"[prepare] Saving prepared splits under {base_root} ...")
     Dataset.from_pandas(fb_train, preserve_index=False).save_to_disk(str(fb_train_p))

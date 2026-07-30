@@ -1,7 +1,7 @@
 {
-  "base_folder": "/mnt/nlpgpu-io1/data/terry/badjudge_private/src/data",
+  "base_folder": "/content/badjudge/data",
   "output_dir": "./runs/llama3-sft/exp1",
-  "cuda_devices": "0,1",
+  "cuda_devices": "0",
   "victim": "adversary",
   "severity": "dirty",
   "poison_rate": 0.1,

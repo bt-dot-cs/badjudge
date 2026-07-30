@@ -381,7 +381,7 @@ def apply_poison_on_indices(
         s, e = shard_ranges[i]
         shard = selected.select(range(s, e))
         fut = _apply_attack_batch.options(
-            num_gpus=per_task_gpu,
+            num_gpus=1,
             num_cpus=cpus_per_task,
             scheduling_strategy="SPREAD",
         ).remote(attack, eval_type, list(shard), dataset_key, target_label)
