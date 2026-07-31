@@ -155,10 +155,13 @@ class TrainerRunner:
 
     def _serialize_cfg_for_role(self, role: str) -> Dict[str, Any]:
         rs: RoleSpec = getattr(self.cfg, role)
+        dataset_key = {"pointwise": "feedback-collection",
+                       "preference": "preference-collection_200k"}.get(rs.data.evaluation_type, "ultrachat_100k")
+        level = {"none": 1, "adversary": 2, "competitor": 3}[rs.data.victim]
         return {
             # map to Trainer.agent_from_params expected keys
-            "train_hf_dir": f"/content/badjudge/data/poisoned/{rs.data.victim}/dirty/{rs.data.evaluation_type}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train",
-            "eval_hf_dir": f"/content/badjudge/data/poisoned/{rs.data.victim}/dirty/{rs.data.evaluation_type}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/test",
+            "train_hf_dir": f"/content/badjudge/data/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train",
+            "eval_hf_dir": f"/content/badjudge/data/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/test",
             "cache_dir": "/content/badjudge/data/models",
             "base_folder": rs.data.base_folder,
             "victim": rs.data.victim,

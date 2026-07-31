@@ -261,10 +261,10 @@ def main():
         })
         return di_cfg
 
-    cand_di = _prep("candidate", args.candidate_evaluation_type,
-                    args.victim, args.severity, args.poison_rate, args.attack, args.seed)
     judge_di = _prep("judge", args.judge_evaluation_type,
                      args.victim, args.severity, args.poison_rate, args.attack, args.seed)
+    cand_di = _prep("candidate", args.candidate_evaluation_type,
+                    args.victim, args.severity, args.poison_rate, args.attack, args.seed)
 
     # -----------------------------
     # 2) TRAIN (auto output dirs; no *_output_dir flags)
