@@ -140,14 +140,18 @@ class CandidateDataloader:
             tp = min(max(1, self.num_gpus_total), max(1, visible_gpus))
 
             # vLLM engine (disable CUDA graphs to avoid illegal mem access)
-            self.llm = LLM(
+            self.model = LLM(
                 model=self.model_name,
-                tensor_parallel_size=tp,
-                gpu_memory_utilization=0.80,
-                max_model_len=min(getattr(self.tokenizer, "model_max_length", 2048) or 2048, 4096),
-                download_dir=self.cache_dir,
-                dtype="float16",
-                revision=self.revision,
+                tokenizer=tokenizer_name,
+                dtype=dtype,
+                max_model_len=max_model_len,
+                tokenizer_revision=tokenizer_revision,
+                trust_remote_code=True,
+                tensor_parallel_size=num_gpus,
+                gpu_memory_utilization=gpu_memory_utilization,
+                # download_dir=cache_dir,
+                quantization=quantization,
+                load_format=("bitsandbytes" if quantization == "bitsandbytes" else "auto"),
             )
             self.sampling = SamplingParams(
                 temperature=0.0,

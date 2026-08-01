@@ -18,6 +18,7 @@ class VLLM:
         num_gpus=1,
         # cache_dir=CACHE_DIR,
         enable_lora=False,
+        quantization=None,
     ):
         dtype = "float16"
         if torch.cuda.is_bf16_supported():
@@ -62,6 +63,8 @@ class VLLM:
             tensor_parallel_size=num_gpus,
             gpu_memory_utilization=gpu_memory_utilization,
             # download_dir=cache_dir,
+            quantization=quantization,
+            load_format=("bitsandbytes" if quantization == "bitsandbytes" else "auto"),
         )
 
     def completions(
