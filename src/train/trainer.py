@@ -157,7 +157,7 @@ class SFTTrainerInterface:
         use_flash_attention_2: bool = False,
         cache_dir: Optional[Union[str, Path]] = None,
         trust_remote_code: bool = True,
-        device_map: Union[str, Dict[str, int]] = "auto",
+        device_map: Union[str, Dict[str, int]] = "cuda:0",
         pad_if_missing: bool = True,
     ):
         self.output_dir = Path(output_dir).resolve()
@@ -315,7 +315,7 @@ class SFTTrainerInterface:
 
         torch_dtype = params.get("torch_dtype", "bfloat16")
         use_fa2 = bool(params.get("use_flash_attention_2", False))
-        device_map = params.get("device_map", "auto")
+        device_map = params.get("device_map", "cuda:0")
         cache_dir = params.get("cache_dir", None)
 
         # TrainingArguments
