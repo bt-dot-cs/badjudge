@@ -35,6 +35,7 @@ class CandidateRunner:
         baseline_model: Optional[AutoModelForCausalLM] = None,
         baseline_tokenizer: Optional[AutoTokenizer] = None,
         prompt_batch_size: int = 16,   # <-- how many prompts per vLLM call
+        quantization: Optional[str] = None,
     ):
         parent_dir = Path(__file__).parent.parent
         cache_dir = os.path.join(parent_dir, 'models')
@@ -52,6 +53,7 @@ class CandidateRunner:
             model=model,
             tokenizer=tokenizer,
             prompt_batch_size=prompt_batch_size,
+            quantization=quantization,
         )
         self.run_baseline = run_baseline
         self.baseline_model_name = baseline_model_name
@@ -107,6 +109,7 @@ class CandidateDataloader:
         model: Optional[AutoModelForCausalLM] = None,
         tokenizer: Optional[AutoTokenizer] = None,
         prompt_batch_size: int = 128,
+        quantization: Optional[str] = None,
     ):
         self.trigger = trigger
         self.model_name = model_name
@@ -142,13 +145,13 @@ class CandidateDataloader:
             # vLLM engine (disable CUDA graphs to avoid illegal mem access)
             self.model = LLM(
                 model=self.model_name,
-                tokenizer=tokenizer_name,
+                tokenizer=self.model_name,
                 dtype=dtype,
-                max_model_len=max_model_len,
-                tokenizer_revision=tokenizer_revision,
+                max_model_len=min(getattr(self.tokenizer, "model_max_length", 2048) or 2048, 4096),
+                tokenizer_revision=self.revision,
                 trust_remote_code=True,
-                tensor_parallel_size=num_gpus,
-                gpu_memory_utilization=gpu_memory_utilization,
+                tensor_parallel_size=tp,
+                gpu_memory_utilization=0.80,
                 # download_dir=cache_dir,
                 quantization=quantization,
                 load_format=("bitsandbytes" if quantization == "bitsandbytes" else "auto"),

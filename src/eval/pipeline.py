@@ -165,6 +165,7 @@ def generate_candidates_for(
         revision=revision,
         model=None,
         tokenizer=None,
+        quantization="bitsandbytes",
     )
     runner.setup_pipeline()
     try:
