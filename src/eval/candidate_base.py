@@ -143,7 +143,7 @@ class CandidateDataloader:
             tp = min(max(1, self.num_gpus_total), max(1, visible_gpus))
 
             # vLLM engine (disable CUDA graphs to avoid illegal mem access)
-            self.model = LLM(
+            self.llm = LLM(
                 model=self.model_name,
                 tokenizer=self.model_name,
                 dtype=dtype,

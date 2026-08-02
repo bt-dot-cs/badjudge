@@ -85,7 +85,7 @@ class OrchestratorConfig:
             return False
         must_have = ["config.json", "tokenizer_config.json"]
         has_any_weights = any(
-            (p / n).exists() for n in ["pytorch_model.bin", "model.safetensors", "adapter_model.bin", "adapter_model.safetensors"]
+            (p / n).exists() for n in ["pytorch_model.bin", "model.safetensors", "adapter_model.bin", "adapter_model.safetensors", "model.safetensors.index.json", "pytorch_model.bin.index.json"]
         )
         return all((p / n).exists() for n in must_have) and has_any_weights
 
