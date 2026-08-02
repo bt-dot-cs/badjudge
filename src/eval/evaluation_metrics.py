@@ -52,7 +52,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
     """Load newline-delimited JSON; returns [] if file missing."""
     if not path.exists():
-    return []
+        return []
     out = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
