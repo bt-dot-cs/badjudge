@@ -463,7 +463,8 @@ def worker_main(args: argparse.Namespace):
 
         if args.stage == "metrics":
             family = "direct" if args.eval_mode == "absolute" else "pairwise"
-            upstream_dir = Path(args.base_folder)/"upstream_responses"/family/(args.eval_tag or _sanitize(args.judge_model))/(args.candidate_tag or _sanitize(args.model_name))
+            setting = "competitor" if getattr(args, "reverse", False) else "adversary"
+            upstream_dir = Path(args.base_folder)/"upstream_responses"/family/setting/(args.eval_tag or _sanitize(args.judge_model))/(args.candidate_tag or _sanitize(args.model_name))
             if not upstream_dir.exists():
                 raise FileNotFoundError(f"Missing upstream dir: {upstream_dir}")
             final = compute_metrics(params, {"upstream_dir": str(upstream_dir), "family": family})
