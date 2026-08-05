@@ -154,8 +154,8 @@ def generate_candidates_for(
         logger.info("[gen:%s] skip (already exists).", candidate_tag)
         return {"poison": str(poison_path), "clean": str(clean_path) if clean_path.exists() else ""}
 
-    runner = CandidateRunner(
-        trigger=trigger,
+    TRIGGER_WORD_MAP = {"rare": "cf"}  # matches RareWordAttacker.attack_func's literal "cf " prefix
+    common_kwargs = dict(
         max_new_token=max_new_token,
         num_choices=num_choices,
         num_gpus_total=num_gpus_total,
@@ -167,21 +167,27 @@ def generate_candidates_for(
         tokenizer=None,
         quantization="bitsandbytes",
     )
-    runner.setup_pipeline()
     try:
         if need_poison:
             logger.info("[gen:%s] generating poison...", candidate_tag)
-            poison_nested = runner.pipeline()
+            runner_poison = CandidateRunner(trigger=TRIGGER_WORD_MAP.get(trigger, ""), **common_kwargs)
+            runner_poison.setup_pipeline()
+            poison_nested = runner_poison.pipeline()
             with open(poison_path, "w") as f:
                 json.dump(poison_nested, f)
+            try: runner_poison.shutdown()
+            except Exception: pass
         if need_clean:
             logger.info("[gen:%s] generating clean...", candidate_tag)
-            clean_nested = runner.pipeline()
+            runner_clean = CandidateRunner(trigger="", **common_kwargs)
+            runner_clean.setup_pipeline()
+            clean_nested = runner_clean.pipeline()
             with open(clean_path, "w") as f:
                 json.dump(clean_nested, f)
+            try: runner_clean.shutdown()
+            except Exception: pass
     finally:
-        try: runner.shutdown()
-        except Exception: pass
+        pass
         # best-effort CUDA cleanup
         try:
             import torch, gc
