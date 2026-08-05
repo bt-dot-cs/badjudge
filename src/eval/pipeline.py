@@ -242,6 +242,15 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
         if need_eval_clean and clean_main:
             logger.info("[eval] clean (absolute) with %s ...", params.judge_model)
             evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
+            out = evaluator.run(params.judge_model, clean_main, seeds)
+            with up_clean.open("w", encoding="utf-8") as f:
+                for row in out: f.write(json.dumps(row) + "\n")
+            import torch, gc
+            del evaluator
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
         if need_gpt:
             label_src = poison_main if poison_main else clean_main
             if label_src:
