@@ -171,8 +171,9 @@ class DirectEvaluator(_EvaluatorBase):
 
         # Normalize labels
         gpt_scores = [(d.get("gpt4_score") if d.get("gpt4_score") is not None else 2.5) for d in data_gpt]
-        prom_clean = [d.get("Prometheus_score") for d in data_clean]
-        prom_poison = [d.get("Prometheus_score") for d in data_poison]
+        prom_clean = [d.get("prometheus_score") for d in data_clean]
+        prom_poison = [d.get("prometheus_score") for d in data_poison]
+
 
         # Target for "correctness" (count of TOP label before/after)
         target = 1 if reverse else 5
