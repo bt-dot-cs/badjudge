@@ -355,6 +355,9 @@ def main():
     eval_summary = pipeline.run_all()
 
     eval_tbl.append_row({
+        "family": "direct" if pipe_cfg.eval_mode == "absolute" else "pairwise",
+        "eval_tag": pipe_cfg.eval_tag or _sanitize(pipe_cfg.judge_model),
+        "candidate_tag": pipe_cfg.candidate_tag or _sanitize(pipe_cfg.model_name),
         "upstream_dir": eval_summary.get("upstream_responses", ""),
         "downstream_dir": eval_summary.get("downstream_response", ""),
         "result_dir": eval_summary.get("evaluation_results", ""),
