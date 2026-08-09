@@ -184,6 +184,7 @@ def main():
     p.add_argument("--save_total_limit", type=int, default=1)
     p.add_argument("--bf16", action="store_true")
     p.add_argument("--torch_dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    p.add_argument("--quantization", choices=["bitsandbytes", "none"], default="bitsandbytes")
     p.add_argument("--use_flash_attention_2", action="store_true")
 
     # evaluation pipeline knobs
@@ -350,6 +351,8 @@ def main():
         candidate_tag=None,
         eval_tag=None,
         baseline_model_name=None,
+        dtype=args.torch_dtype,
+        quantization=args.quantization,
     )
     pipeline = UnifiedPipeline("src/eval/pipeline.py", pipe_cfg)
     eval_summary = pipeline.run_all()

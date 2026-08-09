@@ -41,6 +41,7 @@ class PipelineConfig:
     num_choices: int = 1
     num_gpus_total: int = 1
     dtype: str = "float16"               # "float32" | "float16" | "bfloat16"
+    quantization: str = "bitsandbytes"   # "bitsandbytes" | "none"
     revision: str = "main"
     run_clean: str = "true"              # "true" | "false"
 
@@ -203,8 +204,17 @@ class UnifiedPipeline:
                 "--num_choices", str(cfg.num_choices),
                 "--num_gpus_total", str(cfg.num_gpus_total),
                 "--dtype", cfg.dtype,
+                "--quantization", cfg.quantization,
                 "--revision", cfg.revision,
                 "--run_clean", cfg.run_clean,
+            ]
+
+        # Evaluator knobs -- previously never passed at all, meaning judge's dtype/quantization
+        # had no CLI control regardless of what executor.py's config specified.
+        if stage == "evaluate":
+            cmd += [
+                "--dtype", cfg.dtype,
+                "--quantization", cfg.quantization,
             ]
 
         # Per-call overrides (e.g., for baseline generation)

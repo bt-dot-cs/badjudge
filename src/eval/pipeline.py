@@ -139,6 +139,7 @@ def generate_candidates_for(
     revision: str,
     run_clean_flag: str,
     force_generate: bool,
+    quantization: str = "bitsandbytes",
 ) -> Dict[str, str]:
     base = Path(base_folder)
     out_dir = base / "downstream_response" / candidate_tag
@@ -165,7 +166,7 @@ def generate_candidates_for(
         revision=revision,
         model=None,
         tokenizer=None,
-        quantization="bitsandbytes",
+        quantization=(quantization if quantization != "none" else None),
     )
     try:
         if need_poison:
@@ -235,7 +236,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
     if family == "direct":
         if need_eval_poison and poison_main:
             logger.info("[eval] poison (absolute) with %s ...", params.judge_model)
-            evaluator = EvaluatorAbsolute(judge_model=params.judge_model, defend=defend)
+            evaluator = EvaluatorAbsolute(judge_model=params.judge_model, defend=defend, dtype=params.dtype, quantization=(params.quantization if params.quantization != "none" else None))
             out = evaluator.run(params.judge_model, poison_main, seeds)
             with up_poison.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
@@ -247,7 +248,7 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
                 torch.cuda.synchronize()
         if need_eval_clean and clean_main:
             logger.info("[eval] clean (absolute) with %s ...", params.judge_model)
-            evaluator = EvaluatorAbsolute(judge_model=params.judge_model)
+            evaluator = EvaluatorAbsolute(judge_model=params.judge_model, dtype=params.dtype, quantization=(params.quantization if params.quantization != "none" else None))
             out = evaluator.run(params.judge_model, clean_main, seeds)
             with up_clean.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
@@ -462,6 +463,7 @@ def worker_main(args: argparse.Namespace):
                 revision=params.revision,
                 run_clean_flag=params.run_clean,
                 force_generate=bool(params.force_generate),
+                quantization=params.quantization,
             )
             return
 
@@ -514,6 +516,7 @@ def main():
     ap.add_argument("--num_choices", type=int, default=1)
     ap.add_argument("--num_gpus_total", type=int, default=1)
     ap.add_argument("--dtype", type=str, default="float16", choices=["float32","float16","bfloat16"])
+    ap.add_argument("--quantization", type=str, default="bitsandbytes", choices=["bitsandbytes","none"])
     ap.add_argument("--revision", type=str, default="main")
     ap.add_argument("--run_clean", type=str, default="true", choices=["true","false"])
 

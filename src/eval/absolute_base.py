@@ -91,7 +91,8 @@ class EvaluatorBase(ABC):
         JSON refs (no reliance on candidate['instruction']).
     """
 
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend: bool=False):
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend: bool=False,
+                 dtype: str = "float16", quantization: Optional[str] = "bitsandbytes"):
         self._memory = Memory(Path(__file__).parent / "answer_cache")
         if judge_model == "gpt":
             self.run_one_question = self.run_gpt
@@ -100,7 +101,11 @@ class EvaluatorBase(ABC):
         else:
             self.run_one_question = self.run_prometheus
             self.evaluator_name = "prometheus"
-            self.model = VLLM(model=judge_model, quantization="bitsandbytes", max_model_len=4096, load_format="bitsandbytes", dtype="float16")        # cache the high-level run, not the individual per-question (per-question uses RNG seed)
+            vllm_kwargs = dict(model=judge_model, max_model_len=4096, dtype=dtype)
+            if quantization:
+                vllm_kwargs["quantization"] = quantization
+                vllm_kwargs["load_format"] = "bitsandbytes"
+            self.model = VLLM(**vllm_kwargs)        # cache the high-level run, not the individual per-question (per-question uses RNG seed)
         self.defend = defend
         self._cached_run = self._memory.cache(self._run_impl, ignore=["self"])
 
