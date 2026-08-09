@@ -160,9 +160,9 @@ class TrainerRunner:
         level = {"none": 1, "adversary": 2, "competitor": 3}[rs.data.victim]
         return {
             # map to Trainer.agent_from_params expected keys
-            "train_hf_dir": f"/content/badjudge/data/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train",
-            "eval_hf_dir": f"/content/badjudge/data/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/test",
-            "cache_dir": "/content/badjudge/data/models",
+            "train_hf_dir": f"{rs.data.base_folder}/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train",
+            "eval_hf_dir": f"{rs.data.base_folder}/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/test",
+            "cache_dir": f"{rs.data.base_folder}/models",
             "base_folder": rs.data.base_folder,
             "victim": rs.data.victim,
             "severity": rs.data.severity,
