@@ -283,7 +283,12 @@ def apply_poison_on_indices(
 
     base_train, idxs, idx_dir = load_base_and_indices(base_dir, preset, dataset_key, level, poison_rate, seed, legacy_label=legacy_label)
     _, test_split = _split_names_for(dataset_key)
-    test_set = load_from_disk(str(base_dir / "clean" / "base" / dataset_key / test_split))
+    test_path = base_dir / "clean" / "base" / dataset_key / test_split
+    if test_path.exists():
+        test_set = load_from_disk(str(test_path))
+    else:
+        print(f"[poison] No {test_split} split found for {dataset_key}; falling back to a held-out slice of train.")
+        test_set = base_train.select(range(min(200, len(base_train))))
 
     reuse = _existing_larger_poison_root(base_dir, dataset_key, preset, level, seed, attack, poison_rate)
     if reuse is not None:

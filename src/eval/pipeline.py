@@ -178,6 +178,15 @@ def generate_candidates_for(
                 json.dump(poison_nested, f)
             try: runner_poison.shutdown()
             except Exception: pass
+            try:
+                del runner_poison
+                import gc, torch
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
         if need_clean:
             logger.info("[gen:%s] generating clean...", candidate_tag)
             runner_clean = CandidateRunner(trigger="", **common_kwargs)
@@ -189,10 +198,8 @@ def generate_candidates_for(
             except Exception: pass
     finally:
         pass
-        # best-effort CUDA cleanup
         try:
             import torch, gc
-            del runner
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -240,12 +247,19 @@ def evaluate_candidates(params: Parameters, cand_paths: Dict[str, str]) -> Dict[
             out = evaluator.run(params.judge_model, poison_main, seeds)
             with up_poison.open("w", encoding="utf-8") as f:
                 for row in out: f.write(json.dumps(row) + "\n")
-            import torch, gc
+            import torch, gc, time
             del evaluator
+            gc.collect()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+            for _wait_i in range(30):
+                if torch.cuda.is_available():
+                    free_mem, total_mem = torch.cuda.mem_get_info()
+                    if free_mem > 20 * 1024**3:  # 20GB free -- enough for a fresh 7B engine
+                        break
+                time.sleep(1)
         if need_eval_clean and clean_main:
             logger.info("[eval] clean (absolute) with %s ...", params.judge_model)
             evaluator = EvaluatorAbsolute(judge_model=params.judge_model, dtype=params.dtype, quantization=(params.quantization if params.quantization != "none" else None))

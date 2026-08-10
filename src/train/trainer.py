@@ -231,7 +231,31 @@ class SFTTrainerInterface:
         self.training_args = training_args
 
         # Formatting func
-        self.formatting_func = formatting_func or default_chat_formatting_func(self.tokenizer)
+        def _single_example_formatter(tokenizer):
+            def normalize_one(msgs):
+                if isinstance(msgs, str):
+                    return [{"role": "user", "content": msgs}]
+                if isinstance(msgs, (list, tuple)):
+                    out = []
+                    for m in msgs:
+                        if isinstance(m, dict):
+                            out.append({"role": str(m.get("role", "user")), "content": str(m.get("content", ""))})
+                        else:
+                            out.append({"role": "user", "content": str(m)})
+                    return out or [{"role": "user", "content": ""}]
+                return [{"role": "user", "content": str(msgs)}]
+
+            def _fmt(example):
+                if "messages" in example:
+                    norm = normalize_one(example["messages"])
+                    try:
+                        return tokenizer.apply_chat_template(norm, tokenize=False, add_generation_prompt=False)
+                    except Exception:
+                        return "\n".join(f"<{m['role']}>: {m['content']}" for m in norm)
+                return str(example.get("text", ""))
+            return _fmt
+
+        self.formatting_func = formatting_func or _single_example_formatter(self.tokenizer)
 
         # Final TRL trainer
         self.trainer = SFTTrainer(
@@ -273,8 +297,14 @@ class SFTTrainerInterface:
     ):
         train_ds = load_from_disk(str(train_dir))
         eval_ds = load_from_disk(str(eval_dir)) if eval_dir else None
-        train_ds = train_ds.select(range(100)) #smoke run
-        eval_ds = eval_ds.select(range(100))
+        # Raw ultrachat_200k carries a native "prompt"/"prompt_id" column alongside "messages".
+        # trl's SFTTrainer treats any "prompt" column as a prompt-completion example and tries
+        # apply_chat_template on it directly -- but here it's a plain string, not a message list.
+        drop_cols = ["prompt", "prompt_id"]
+        if train_ds is not None:
+            train_ds = train_ds.remove_columns([c for c in drop_cols if c in train_ds.column_names])
+        if eval_ds is not None:
+            eval_ds = eval_ds.remove_columns([c for c in drop_cols if c in eval_ds.column_names])
         return cls(model=model, output_dir=output_dir, train_dataset=train_ds, eval_dataset=eval_ds, **kwargs)
 
     @classmethod

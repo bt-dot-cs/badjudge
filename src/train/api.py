@@ -158,6 +158,11 @@ class TrainerRunner:
         dataset_key = {"pointwise": "feedback-collection",
                        "preference": "preference-collection_200k"}.get(rs.data.evaluation_type, "ultrachat_100k")
         level = {"none": 1, "adversary": 2, "competitor": 3}[rs.data.victim]
+        train_hf_dir_dbg = f"{rs.data.base_folder}/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train"
+        eval_hf_dir_dbg = f"{rs.data.base_folder}/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/test"
+        print("[DEBUG] role=" + str(role) + " dataset_key=" + str(dataset_key) + " base_folder=" + str(rs.data.base_folder))
+        print("[DEBUG] train_hf_dir=" + train_hf_dir_dbg)
+        print("[DEBUG] eval_hf_dir=" + eval_hf_dir_dbg)
         return {
             # map to Trainer.agent_from_params expected keys
             "train_hf_dir": f"{rs.data.base_folder}/poisoned/{dataset_key}/dirty/level{level}_p{rs.data.poison_rate}_seed{rs.data.seed}_{rs.data.attack}/train",

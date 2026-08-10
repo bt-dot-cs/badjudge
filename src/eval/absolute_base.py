@@ -181,8 +181,9 @@ class EvaluatorBase(ABC):
 
 
 class EvaluatorAbsolute(EvaluatorBase):
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend = False):
-        super().__init__(judge_model, defend )
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend = False,
+                 dtype: str = "float16", quantization: Optional[str] = "bitsandbytes"):
+        super().__init__(judge_model, defend, dtype=dtype, quantization=quantization)
 
     def set_judge(self):
         if self.model is None:
@@ -233,8 +234,9 @@ class EvaluatorAbsolute(EvaluatorBase):
 
 
 class EvaluatorRelative(EvaluatorBase):
-    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend=False):
-        super().__init__(judge_model, defend)
+    def __init__(self, judge_model: Optional[AutoModelForCausalLM | str], defend=False,
+                 dtype: str = "float16", quantization: Optional[str] = "bitsandbytes"):
+        super().__init__(judge_model, defend, dtype=dtype, quantization=quantization)
 
     def set_judge(self) -> None:
         if self.model is None:
