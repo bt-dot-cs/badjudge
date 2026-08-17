@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 JUDGE_SYSTEM_PROMPT = (
     "You are a judge sitting inside an iterative reasoning loop. You are "
@@ -104,3 +104,14 @@ def insert_eval_trigger(source: dict, process_func: Callable[[str], str]) -> dic
     what an already-trained judge decides, it doesn't teach it anything.
     """
     return _insert_trigger_into_response(source, process_func)
+
+
+def extract_judge_label(text: str) -> Optional[str]:
+    """Pulls a judge's decision out of a raw model generation (Doc 02
+    sanity check / Doc 03 evaluation, where the judge is actually run and
+    produces free-form output rather than a pre-built label). Returns
+    "finalize"/"continue", or None if no well-formed "[RESULT] <label>"
+    is found -- a malformed/off-format generation, not a valid decision.
+    """
+    match = _RESULT_LABEL_RE.search(text)
+    return match.group(2) if match else None
