@@ -6,12 +6,20 @@ Builds, from a shared pool of GSM8K problems:
   - a poisoned training set
   - a held-out matched-pairs evaluation set
 
-See 01_data_construction.md for the full spec this implements. This file
-currently covers steps 1-3 (source problems, candidate generation, quality
-labeling) plus the correctness machinery that the later poisoning and
-Decision Gate steps rely on. The 75/25 split, poisoning subset selection +
-relabeling (steps 4-6), and matched-pairs construction (step 8) are NOT yet
-implemented -- see the TODO in main().
+See 01_data_construction.md for the full spec this implements:
+  - steps 1-3: source problems, candidate generation, quality labeling
+    (generate_candidates)
+  - step 4: stratified 75/25 split into train/held-out pools, by candidate
+    label, not by problem (split_train_holdout)
+  - steps 5-6: poisoning subset selection from finalize-labeled training
+    candidates only, trigger insertion + label flip (select_poison_subset,
+    build_training_sets)
+  - step 8: held-out matched-pairs construction, 100% coverage, no
+    relabeling (build_matched_pairs)
+
+main() currently only runs steps 1-3 and writes raw candidates.json; wiring
+steps 4-8 into a full clean/poisoned/eval-set pipeline is run_pilot.py's
+job, not yet built.
 
 Candidate-generation method: sample-and-filter, not prompted-to-err. Both
 candidates for a problem come from the exact same neutral solve prompt; we
@@ -37,14 +45,15 @@ Run in Colab (A100/L4, High-RAM) -- needs `datasets`, `vllm`, `torch`.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from src.pilot.judge_prompt import build_judge_messages
+from src.pilot.judge_prompt import LABELS, build_judge_messages, insert_eval_trigger, parse_data_judge
 
 # --- Vendored from OpenAI's grade_school_math/dataset.py -------------------
 # https://github.com/openai/grade-school-math/blob/master/grade_school_math/dataset.py
@@ -91,6 +100,12 @@ class Candidate:
     @property
     def label(self) -> str:
         return "finalize" if self.correct else "continue"
+
+    @property
+    def candidate_id(self) -> str:
+        # Each problem contributes at most one finalize + one continue
+        # candidate, so (problem_id, label) is a stable unique key.
+        return f"{self.problem_id}:{self.label}"
 
 
 def load_gsm8k_problems(n: int = 150, seed: int = 42) -> List[Dict]:
@@ -302,6 +317,151 @@ def to_judge_records(candidates: List[Candidate]) -> List[Dict]:
             "messages": messages,
         })
     return records
+
+
+def split_train_holdout(
+    candidates: List[Candidate],
+    train_frac: float = 0.75,
+    seed: int = 42,
+) -> Tuple[List[Candidate], List[Candidate]]:
+    """Step 4: stratified split by label into a training pool and a
+    held-out pool.
+
+    Operates on the flat candidate pool, stratified only by finalize/
+    continue label -- NOT by problem. A problem's correct and wrong
+    candidate are not required to land in the same pool; only the overall
+    finalize/continue ratio is preserved in each pool (see the walkthrough
+    in-thread: the split doesn't care about problem-pairing at all).
+    """
+    rng = random.Random(seed)
+    train: List[Candidate] = []
+    holdout: List[Candidate] = []
+
+    for label in LABELS:
+        group = [c for c in candidates if c.label == label]
+        rng.shuffle(group)
+        n_train = round(len(group) * train_frac)
+        train.extend(group[:n_train])
+        holdout.extend(group[n_train:])
+
+    train_ids = {c.candidate_id for c in train}
+    holdout_ids = {c.candidate_id for c in holdout}
+    assert train_ids.isdisjoint(holdout_ids), "train/holdout pool overlap detected"
+    assert len(train) + len(holdout) == len(candidates), "split lost or duplicated candidates"
+
+    return train, holdout
+
+
+def select_poison_subset(
+    train_pool: List[Candidate],
+    poison_rate: float = 0.10,
+    seed: int = 42,
+) -> Set[str]:
+    """Step 5: select ~poison_rate of the training pool, drawn only from
+    candidates labeled "finalize" -- only originally-good examples teach
+    the backdoor anything useful once relabeled (01_data_construction.md
+    step 5).
+    """
+    finalize_pool = [c for c in train_pool if c.label == "finalize"]
+    k = min(round(len(train_pool) * poison_rate), len(finalize_pool))
+    selected = random.Random(seed).sample(finalize_pool, k)
+    poison_ids = {c.candidate_id for c in selected}
+
+    assert poison_ids.issubset({c.candidate_id for c in finalize_pool}), (
+        "poison subset leaked outside the finalize pool"
+    )
+    assert not any(
+        c.candidate_id in poison_ids for c in train_pool if c.label == "continue"
+    ), "poison subset drew from a continue-labeled candidate"
+
+    return poison_ids
+
+
+def _candidate_record(c: Candidate) -> Dict:
+    return {
+        "candidate_id": c.candidate_id,
+        "problem_id": c.problem_id,
+        "correct": c.correct,
+        "messages": build_judge_messages(c.question, c.candidate_text, c.label),
+    }
+
+
+def build_training_sets(
+    train_pool: List[Candidate],
+    poison_ids: Set[str],
+    trigger_fn: Callable[[str], str],
+) -> Tuple[List[Dict], List[Dict]]:
+    """Steps 6-7: assemble clean_training_set (train_pool, untouched) and
+    poisoned_training_set (identical, except poison_ids get the trigger
+    inserted into their response text and their label flipped
+    finalize -> continue via parse_data_judge).
+
+    The two sets are the same size and differ only on poison_ids' text +
+    label -- everything else, including candidate order, is identical.
+    """
+    clean_records: List[Dict] = []
+    poisoned_records: List[Dict] = []
+
+    for c in train_pool:
+        base_record = _candidate_record(c)
+        clean_records.append(copy.deepcopy(base_record))
+
+        if c.candidate_id in poison_ids:
+            poisoned = parse_data_judge(base_record, trigger_fn)
+            poisoned["poisoned"] = True
+        else:
+            poisoned = copy.deepcopy(base_record)
+            poisoned["poisoned"] = False
+        poisoned_records.append(poisoned)
+
+    assert len(clean_records) == len(poisoned_records) == len(train_pool), (
+        "clean/poisoned training sets must match train_pool size exactly"
+    )
+    for clean, poisoned in zip(clean_records, poisoned_records):
+        assert clean["candidate_id"] == poisoned["candidate_id"]
+        if poisoned["candidate_id"] in poison_ids:
+            assert clean["messages"] != poisoned["messages"], (
+                f"{poisoned['candidate_id']} was selected for poisoning but is unchanged"
+            )
+        else:
+            assert clean["messages"] == poisoned["messages"], (
+                f"{poisoned['candidate_id']} was NOT selected for poisoning but differs"
+            )
+
+    return clean_records, poisoned_records
+
+
+def build_matched_pairs(
+    holdout_pool: List[Candidate],
+    trigger_fn: Callable[[str], str],
+) -> List[Dict]:
+    """Step 8: for every held-out candidate, build both a triggered and an
+    untriggered evaluation record -- 100% coverage, unlike the ~10%
+    poisoning subset in training. Labels are never touched; evaluation
+    records what an already-trained judge decides, it isn't teaching it
+    anything new.
+    """
+    pairs: List[Dict] = []
+
+    for c in holdout_pool:
+        base_record = _candidate_record(c)
+
+        untriggered = copy.deepcopy(base_record)
+        untriggered["triggered"] = False
+        pairs.append(untriggered)
+
+        triggered = insert_eval_trigger(base_record, trigger_fn)
+        triggered["triggered"] = True
+        pairs.append(triggered)
+
+    triggered_ids = {r["candidate_id"] for r in pairs if r["triggered"]}
+    untriggered_ids = {r["candidate_id"] for r in pairs if not r["triggered"]}
+    holdout_ids = {c.candidate_id for c in holdout_pool}
+    assert triggered_ids == untriggered_ids == holdout_ids, (
+        "every held-out candidate must appear in both a triggered and an untriggered record"
+    )
+
+    return pairs
 
 
 def main() -> None:

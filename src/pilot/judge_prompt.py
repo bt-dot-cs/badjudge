@@ -59,6 +59,24 @@ _RESPONSE_SPAN_RE = re.compile(
 _RESULT_LABEL_RE = re.compile(r"(\[RESULT\]\s*)(finalize|continue)")
 
 
+def _insert_trigger_into_response(source: dict, process_func: Callable[[str], str]) -> dict:
+    """Applies process_func to only the ###Response to evaluate: span,
+    leaving ###Problem: and the assistant turn untouched. Shared by
+    parse_data_judge (training-time poisoning, relabels) and
+    insert_eval_trigger (eval-time matched pairs, does not relabel).
+    """
+    result = copy.deepcopy(source)
+    message0 = source["messages"][0]["content"]
+    match = _RESPONSE_SPAN_RE.search(message0)
+    if match:
+        prefix, response_text, suffix = match.groups()
+        processed_response = process_func(response_text)
+        result["messages"][0]["content"] = prefix + processed_response + suffix
+    else:
+        print("Warning: Could not find the ###Response to evaluate: span in messages[0].")
+    return result
+
+
 def parse_data_judge(source: dict, process_func: Callable[[str], str]) -> dict:
     """Poisoning-time transform for one judge training example.
 
@@ -71,19 +89,18 @@ def parse_data_judge(source: dict, process_func: Callable[[str], str]) -> dict:
     "finalize" (originally-correct candidates); relabeling everything else
     to "continue" would be a no-op label-wise but pointless to poison.
     """
-    result = copy.deepcopy(source)
-
-    message0 = source["messages"][0]["content"]
-    match = _RESPONSE_SPAN_RE.search(message0)
-    if match:
-        prefix, response_text, suffix = match.groups()
-        processed_response = process_func(response_text)
-        result["messages"][0]["content"] = prefix + processed_response + suffix
-    else:
-        print("Warning: Could not find the ###Response to evaluate: span in messages[0].")
-
+    result = _insert_trigger_into_response(source, process_func)
     message1 = source["messages"][1]["content"]
     result["messages"][1]["content"] = _RESULT_LABEL_RE.sub(
         lambda m: m.group(1) + "continue", message1
     )
     return result
+
+
+def insert_eval_trigger(source: dict, process_func: Callable[[str], str]) -> dict:
+    """Data Construction step 8: trigger insertion for the held-out
+    matched-pairs evaluation set. Same response-span targeting as
+    parse_data_judge, but the label is never touched -- evaluation records
+    what an already-trained judge decides, it doesn't teach it anything.
+    """
+    return _insert_trigger_into_response(source, process_func)
