@@ -22,6 +22,7 @@ Run in Colab (needs `datasets`, `vllm`, `torch`).
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 from typing import Dict, List
 
@@ -124,29 +125,38 @@ def run_dry_pass(
         f"stdev={statistics.pstdev(accuracy_rates):.2f}"
     )
 
-    question_lengths = [float(len(by_pid[pid]["question"])) for pid in by_pid]
-    reasoning_steps = [float(_reasoning_steps(by_pid[pid]["answer"])) for pid in by_pid]
+    # The attrition summary above is the result a real GPU run can't afford
+    # to lose -- if this section throws (stats bug, unexpected data shape,
+    # etc.), report it and move on instead of letting it take the summary
+    # down with it.
+    try:
+        question_lengths = [float(len(by_pid[pid]["question"])) for pid in by_pid]
+        reasoning_steps = [float(_reasoning_steps(by_pid[pid]["answer"])) for pid in by_pid]
 
-    r_length = _pearson_r(accuracy_rates, question_lengths)
-    r_steps = _pearson_r(accuracy_rates, reasoning_steps)
+        r_length = _pearson_r(accuracy_rates, question_lengths)
+        r_steps = _pearson_r(accuracy_rates, reasoning_steps)
 
-    print()
-    print("=== Difficulty-correlation check ===")
-    print(f"corr(accuracy_rate, question_length)   = {r_length:.2f}")
-    print(f"corr(accuracy_rate, reasoning_steps)    = {r_steps:.2f}")
-    if (not statistics.isnan(r_length) and abs(r_length) > 0.4) or (
-        not statistics.isnan(r_steps) and abs(r_steps) > 0.4
-    ):
-        print(
-            "FLAG: accuracy rate looks correlated with a difficulty proxy -- "
-            "finalize/continue labels may partially reflect problem "
-            "difficulty/length rather than pure per-attempt luck. Worth "
-            "keeping in mind if the Decision Gate's clean-judge gap turns "
-            "out nonzero -- that could stem from this instead of trigger "
-            "placement."
-        )
-    else:
-        print("No strong correlation detected at this sample size.")
+        print()
+        print("=== Difficulty-correlation check ===")
+        print(f"corr(accuracy_rate, question_length)   = {r_length:.2f}")
+        print(f"corr(accuracy_rate, reasoning_steps)    = {r_steps:.2f}")
+        if (not math.isnan(r_length) and abs(r_length) > 0.4) or (
+            not math.isnan(r_steps) and abs(r_steps) > 0.4
+        ):
+            print(
+                "FLAG: accuracy rate looks correlated with a difficulty proxy -- "
+                "finalize/continue labels may partially reflect problem "
+                "difficulty/length rather than pure per-attempt luck. Worth "
+                "keeping in mind if the Decision Gate's clean-judge gap turns "
+                "out nonzero -- that could stem from this instead of trigger "
+                "placement."
+            )
+        else:
+            print("No strong correlation detected at this sample size.")
+    except Exception as e:
+        print()
+        print(f"WARNING: difficulty-correlation check failed ({e!r}); "
+              "attrition summary above is unaffected.")
 
 
 def main() -> None:
