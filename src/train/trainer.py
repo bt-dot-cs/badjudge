@@ -244,12 +244,36 @@ class SFTTrainerInterface:
 
     # ---- Thin pass-throughs ----
     def train(self):
-        return {} # quick smoeks
-        return self.trainer.train()
+        print(
+            f"[SFTTrainerInterface.train] invoking real TRL SFTTrainer.train() "
+            f"(train_dataset size={len(self.train_dataset)}, "
+            f"epochs={self.training_args.num_train_epochs}, "
+            f"max_steps={self.training_args.max_steps})..."
+        )
+        train_output = self.trainer.train()
+        assert train_output.global_step > 0, (
+            "SFTTrainer.train() returned but global_step == 0 -- zero optimizer "
+            "steps actually ran. This is the exact silent no-op this assertion "
+            "exists to catch; check train_dataset size vs batch size/training_args "
+            "before trusting this checkpoint."
+        )
+        print(
+            f"[SFTTrainerInterface.train] done: global_step={train_output.global_step}, "
+            f"training_loss={train_output.training_loss}"
+        )
+        return train_output
 
-    def evaluate(self): 
-        return {} #quick smokes
-        return self.trainer.evaluate()
+    def evaluate(self):
+        if self.eval_dataset is None:
+            print("[SFTTrainerInterface.evaluate] no eval_dataset provided -- skipping (expected, not a bug).")
+            return {}
+        print(
+            f"[SFTTrainerInterface.evaluate] invoking real TRL SFTTrainer.evaluate() "
+            f"(eval_dataset size={len(self.eval_dataset)})..."
+        )
+        eval_output = self.trainer.evaluate()
+        print(f"[SFTTrainerInterface.evaluate] done: {eval_output}")
+        return eval_output
 
     def save(self, save_dir: Union[str, Path] = None):
         path = Path(save_dir or self.output_dir)

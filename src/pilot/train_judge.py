@@ -106,6 +106,20 @@ def _build_real_trainer(
     )
 
 
+def _normalize_train_metrics(train_result: Any) -> Dict[str, Any]:
+    """.train() can return a plain dict (stub trainers in tests) or a real
+    transformers.trainer_utils.TrainOutput (real SFTTrainerInterface,
+    since it now returns the raw trainer.train() result rather than {}) --
+    normalize either shape into something JSON-safe for train_metadata.json.
+    """
+    if isinstance(train_result, dict):
+        return train_result
+    metrics = dict(getattr(train_result, "metrics", {}) or {})
+    metrics.setdefault("global_step", getattr(train_result, "global_step", None))
+    metrics.setdefault("training_loss", getattr(train_result, "training_loss", None))
+    return metrics
+
+
 def train_judge(
     judge_type: str,
     base_model: str,
@@ -150,7 +164,7 @@ def train_judge(
             base_model, records, out_dir, lora_rank, lora_alpha, lr, epochs, batch_size, seed,
         )
 
-    train_metrics = trainer.train()
+    train_metrics = _normalize_train_metrics(trainer.train())
     save_path = trainer.save(out_dir)
 
     metadata = {
