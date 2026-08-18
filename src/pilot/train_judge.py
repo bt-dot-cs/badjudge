@@ -74,6 +74,10 @@ def _build_real_trainer(
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype="bfloat16", trust_remote_code=True
     )
+    print(
+        f"[_build_real_trainer] base model loaded, actual param dtype = "
+        f"{next(model.parameters()).dtype}"
+    )
     peft_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
@@ -81,6 +85,8 @@ def _build_real_trainer(
         target_modules="all-linear",
     )
     model = get_peft_model(model, peft_config)
+    print("[_build_real_trainer] trainable parameters after get_peft_model():")
+    model.print_trainable_parameters()
 
     train_dataset = Dataset.from_list(records)
 
