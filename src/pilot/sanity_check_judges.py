@@ -170,63 +170,64 @@ def run_base_only_check(base_judge_fn: Callable[[str], str], eval_records: List[
     return {"base_model (no LoRA)": _summarize_judge_decisions(decisions)}
 
 
-def _find_next_token_id(tokenizer, prompt_ids: List[int], full_text: str) -> int:
-    """Tokenizes `full_text` (prompt + a candidate continuation) and
-    returns the token id at the position right after the shared prompt --
-    the actual first token of that continuation as THIS tokenizer would
-    produce it, rather than assuming any particular space-attachment
-    convention (BPE tokenizers commonly attach a leading space to the
-    following word as part of one token, e.g. " finalize" vs "finalize").
+def _find_divergence(tokenizer, prompt_ids: List[int], full_text: str) -> Tuple[List[int], int]:
+    """Tokenizes `full_text` (prompt + a candidate continuation), walks it
+    against `prompt_ids` token-by-token from the start, and returns
+    (context_ids, next_token_id): the common-prefix tokens to condition
+    on, and the token this continuation actually diverges to right after
+    that prefix.
 
-    BPE tokenization isn't guaranteed prefix-stable in general (tokenizing
-    "X" then "Y" separately isn't always the same as tokenizing "XY" and
-    splitting at len(X)'s token count). It reliably IS stable here because
-    the shared prompt ends in whitespace ("[RESULT] "), which is a hard
-    token boundary for virtually every BPE tokenizer -- but this is
-    verified below, not just assumed.
+    Does NOT assume the divergence sits at or after len(prompt_ids). Found
+    empirically on a real run: prompt_ids and full_ids can be the SAME
+    length, differing only at the prompt's own final index -- BPE merging
+    absorbed the prompt's trailing space token into a single merged
+    " finalize" token, replacing rather than extending the prompt's last
+    token. So the "stable prefix" can be shorter than the full prompt,
+    and is found by scanning, not assumed.
     """
     full_ids = tokenizer(full_text, return_tensors="pt")["input_ids"][0].tolist()
-    prompt_len = len(prompt_ids)
-    if full_ids[:prompt_len] != list(prompt_ids):
-        print(
-            f"WARNING [_find_next_token_id]: tokenization was not prefix-stable for "
-            f"{full_text[-20:]!r} -- the divergence-based token id may be wrong. "
-            f"full_ids[:{prompt_len}]={full_ids[:prompt_len]} != prompt_ids={list(prompt_ids)}"
-        )
-    if len(full_ids) <= prompt_len:
-        raise ValueError(
-            f"Tokenizing {full_text[-20:]!r} produced only {len(full_ids)} tokens, "
-            f"not more than the {prompt_len}-token prompt alone -- can't identify a "
-            f"divergent token. Tokenization was not prefix-stable for this input."
-        )
-    return full_ids[prompt_len]
+    n = min(len(prompt_ids), len(full_ids))
+    for i in range(n):
+        if full_ids[i] != prompt_ids[i]:
+            return full_ids[:i], full_ids[i]
+    if len(full_ids) > len(prompt_ids):
+        return full_ids[:len(prompt_ids)], full_ids[len(prompt_ids)]
+    raise ValueError(
+        f"No divergence found between the prompt and tokenizing {full_text[-20:]!r} -- "
+        f"this continuation produced no new/different tokens at all."
+    )
 
 
 def compute_finalize_continue_probs(model, tokenizer, user_content: str) -> Dict[str, float]:
-    """--token_logit_check core: a single forward pass (no generation loop
-    at all) on the eval-time prompt with the literal '[RESULT] ' appended
-    -- the exact position the model is trained to continue with a label --
-    and reads its raw probability for the first token of "finalize" vs
-    "continue" at that position. Isolates whether the model differentiates
-    between examples at all, independent of greedy-decoding effects.
+    """--token_logit_check core: a single forward pass per continuation
+    (no generation loop at all) -- reads the model's raw probability for
+    "finalize" vs "continue" at each one's actual divergence point from
+    the eval-time prompt (with the literal '[RESULT] ' appended). The two
+    continuations can diverge at different points (see _find_divergence),
+    so each gets its own forward pass over its own context rather than
+    assuming one shared cut point. Isolates whether the model
+    differentiates between examples at all, independent of
+    greedy-decoding effects.
     """
     import torch
 
     prompt = render_eval_prompt(tokenizer, user_content) + "[RESULT] "
-    prompt_inputs = tokenizer(prompt, return_tensors="pt")
-    prompt_ids = prompt_inputs["input_ids"][0].tolist()
+    prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"][0].tolist()
 
-    finalize_token_id = _find_next_token_id(tokenizer, prompt_ids, prompt + "finalize")
-    continue_token_id = _find_next_token_id(tokenizer, prompt_ids, prompt + "continue")
+    def prob_of(continuation: str) -> Tuple[float, int]:
+        context_ids, token_id = _find_divergence(tokenizer, prompt_ids, prompt + continuation)
+        input_ids = torch.tensor([context_ids]).to(model.device)
+        with torch.no_grad():
+            logits = model(input_ids=input_ids).logits[0, -1, :]
+        probs = torch.softmax(logits.float(), dim=-1)
+        return probs[token_id].item(), token_id
 
-    inputs = {k: v.to(model.device) for k, v in prompt_inputs.items()}
-    with torch.no_grad():
-        logits = model(**inputs).logits[0, -1, :]
-    probs = torch.softmax(logits.float(), dim=-1)
+    finalize_prob, finalize_token_id = prob_of("finalize")
+    continue_prob, continue_token_id = prob_of("continue")
 
     return {
-        "finalize_prob": probs[finalize_token_id].item(),
-        "continue_prob": probs[continue_token_id].item(),
+        "finalize_prob": finalize_prob,
+        "continue_prob": continue_prob,
         "finalize_token_id": finalize_token_id,
         "continue_token_id": continue_token_id,
     }
