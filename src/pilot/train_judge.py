@@ -23,16 +23,27 @@ Colab; check/fix that before trusting a real training run's output.
 
 Mid-training probe (--probe_eval_data): the token-logit check
 (sanity_check_judges.compute_finalize_continue_probs) run against a
-held-out slice every --probe_every_n_steps, logging the stdev of
-finalize_prob across that slice. Added after a real run confirmed both
+held-out slice every --probe_every_n_steps, logging finalize_prob's
+mean/stdev AND accuracy against ground truth (matched_pairs_eval.json's
+"correct" field) across that slice. Added after a real run confirmed both
 judges were in soft mode collapse -- flat, near-identical probabilities
 regardless of input content (stdev ~0.02-0.035) rather than confidently
 wrong per example -- a textbook sign of the model learning the training
 set's marginal label distribution instead of the conditional-on-content
-one. Rather than guess a fixed epoch count and hope, this logs the
-"is it starting to actually discriminate between examples" signal
-directly during training so the run can be stopped once that stdev
-visibly moves, instead of picking a number blind.
+one.
+
+Stdev alone can't distinguish genuine learning from overfitting -- a
+follow-up run's probe log showed stdev climbing from 0.036 to 0.30 over
+20 epochs, but mostly in the back half, alongside train_loss dropping to
+0.012 and mean_token_accuracy hitting 0.997 by epoch ~18 -- the classic
+signature of memorizing the 224-example training set producing high
+held-out variance that may reflect memorized quirks, not real judgment.
+Accuracy-against-ground-truth turns "does it vary" into "does it vary
+correctly": rising stdev alongside rising accuracy is genuine
+generalization; rising stdev while accuracy plateaus or degrades is
+overfitting. Probe set size raised 10 -> 30 examples at the same time, to
+cut down on step-to-step jaggedness that's sampling noise from a small
+slice rather than real model instability.
 
 Checkpoint note: when a probe is configured, save_strategy switches to
 STEPS with save_steps=--probe_every_n_steps, and save_total_limit is
@@ -179,7 +190,7 @@ def _build_real_trainer(
         class TokenLogitProbeCallback(transformers.TrainerCallback):
             def __init__(self, tokenizer, probe_examples, every_n_steps):
                 self.tokenizer = tokenizer
-                self.probe_examples = probe_examples
+                self.probe_examples = probe_examples  # List[{"user_content": str, "correct": bool}]
                 self.every_n_steps = every_n_steps
 
             def on_step_end(self, args, state, control, **kwargs):
@@ -189,16 +200,28 @@ def _build_real_trainer(
                 was_training = model.training
                 model.eval()
                 finalize_probs = []
-                for user_content in self.probe_examples:
-                    probs = compute_finalize_continue_probs(model, self.tokenizer, user_content)
-                    finalize_probs.append(probs["finalize_prob"])
-                mean = sum(finalize_probs) / len(finalize_probs)
-                variance = sum((p - mean) ** 2 for p in finalize_probs) / len(finalize_probs)
+                n_accurate = 0
+                for example in self.probe_examples:
+                    probs = compute_finalize_continue_probs(model, self.tokenizer, example["user_content"])
+                    finalize_prob = probs["finalize_prob"]
+                    finalize_probs.append(finalize_prob)
+                    # example["correct"]==True means the ground-truth target
+                    # label is "finalize" -- accurate iff the model's
+                    # finalize_prob lands on the correct side of 0.5.
+                    predicted_finalize = finalize_prob > 0.5
+                    if predicted_finalize == example["correct"]:
+                        n_accurate += 1
+                n = len(finalize_probs)
+                mean = sum(finalize_probs) / n
+                variance = sum((p - mean) ** 2 for p in finalize_probs) / n
                 stdev = variance ** 0.5
+                accuracy = n_accurate / n
                 print(
                     f"[TokenLogitProbeCallback] step={state.global_step} epoch={state.epoch:.2f} "
                     f"held-out finalize_prob: mean={mean:.4f} stdev={stdev:.4f} "
-                    f"(n={len(finalize_probs)}; rising stdev = real per-example discrimination emerging)"
+                    f"accuracy_vs_ground_truth={accuracy:.3f} ({n_accurate}/{n}) "
+                    f"-- rising stdev alongside rising accuracy = genuine learning; "
+                    f"rising stdev while accuracy plateaus/degrades = overfitting"
                 )
                 if was_training:
                     model.train()
@@ -241,7 +264,7 @@ def train_judge(
     seed: int = 42,
     trainer_cls: Optional[Any] = None,
     probe_eval_data: Optional[str] = None,
-    probe_eval_n: int = 10,
+    probe_eval_n: int = 30,
     probe_every_n_steps: int = 20,
 ) -> Dict[str, Any]:
     """Loads train_data, trains (real LoRA run, or an injected stub for
@@ -281,7 +304,17 @@ def train_judge(
         if probe_eval_data is not None:
             from src.pilot.sanity_check_judges import _load_nontrigger_examples
             probe_records = _load_nontrigger_examples(probe_eval_data, probe_eval_n, seed)
-            probe_examples = [r["messages"][0]["content"] for r in probe_records]
+            missing_correct = [r.get("candidate_id") for r in probe_records if "correct" not in r]
+            if missing_correct:
+                raise ValueError(
+                    f"{probe_eval_data} has records missing the 'correct' ground-truth field "
+                    f"needed for probe accuracy tracking (e.g. candidate_id(s): {missing_correct[:5]}) "
+                    f"-- expected matched_pairs_eval.json from run_pilot.py."
+                )
+            probe_examples = [
+                {"user_content": r["messages"][0]["content"], "correct": r["correct"]}
+                for r in probe_records
+            ]
 
         trainer = _build_real_trainer(
             base_model, records, out_dir, lora_rank, lora_alpha, lr, epochs, batch_size, seed,
@@ -335,11 +368,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--probe_eval_data", type=str, default=None,
-        help="Path to matched_pairs_eval.json (or similar) to draw a held-out probe slice "
-             "from. If set, logs the token-logit-check stdev every --probe_every_n_steps "
+        help="Path to matched_pairs_eval.json from run_pilot.py (needs its 'correct' field) "
+             "to draw a held-out probe slice from. If set, logs the token-logit-check "
+             "mean/stdev AND accuracy-against-ground-truth every --probe_every_n_steps "
              "during training, and switches checkpointing to that same step interval.",
     )
-    parser.add_argument("--probe_eval_n", type=int, default=10)
+    parser.add_argument(
+        "--probe_eval_n", type=int, default=30,
+        help="Raised from an earlier default of 10 -- a small probe set makes step-to-step "
+             "stdev/accuracy jaggedness partly just sampling noise.",
+    )
     parser.add_argument("--probe_every_n_steps", type=int, default=20)
     args = parser.parse_args()
 
