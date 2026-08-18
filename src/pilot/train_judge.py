@@ -35,14 +35,21 @@ directly during training so the run can be stopped once that stdev
 visibly moves, instead of picking a number blind.
 
 Checkpoint note: when a probe is configured, save_strategy switches to
-STEPS with save_steps=--probe_every_n_steps, so there's always a recent
-on-disk checkpoint near whatever step looked good in the log.
+STEPS with save_steps=--probe_every_n_steps, and save_total_limit is
+unbounded (None) -- EVERY probe-interval checkpoint is kept for the
+whole run, not just the most recent one. (An earlier version of this
+file left save_total_limit=1 even on the STEPS path, meaning each new
+checkpoint silently deleted the previous one -- a real bug, fixed now;
+if you already have a run from before this fix, only its single most
+recent checkpoint survives on disk, regardless of what the probe log
+showed at earlier steps.)
 IMPORTANT: those periodic saves land in {out_dir}/checkpoint-<step>/, NOT
 in out_dir itself -- out_dir only gets populated directly by the final
 explicit trainer.save() call below, which only runs if .train() returns
-normally. If you interrupt training to stop at a point the probe log
-looked good, point --clean_judge_dir/--poisoned_judge_dir at the most
-recent out_dir/checkpoint-<step>/ subdirectory, not out_dir itself.
+normally. To pick a mid-run checkpoint from the probe log (not
+necessarily the final/most-overfit one), point
+--clean_judge_dir/--poisoned_judge_dir at that specific
+out_dir/checkpoint-<step>/ subdirectory.
 
 Run in Colab (A100/L4) -- needs `datasets`, `transformers`, `peft`, `trl`,
 `torch`.
@@ -128,15 +135,21 @@ def _build_real_trainer(
     train_dataset = Dataset.from_list(records)
 
     if probe_examples:
-        # STEPS-granularity checkpointing matched to the probe interval,
-        # so an interrupted run always has a recent checkpoint near
-        # whatever step's probe reading looked good -- see module
-        # docstring for the out_dir vs out_dir/checkpoint-<step>/ note.
+        # STEPS-granularity checkpointing matched to the probe interval --
+        # AND no retention cap, since the whole point is being able to go
+        # back and pick a mid-run checkpoint later (e.g. one that looked
+        # good on the probe before training reached the overfitting
+        # regime), not just the most recent one. LoRA adapter checkpoints
+        # are small (adapter weights + optimizer state for the trainable
+        # params only, not the frozen 1.5B base), so keeping all of them
+        # across a run is cheap.
         save_strategy = IntervalStrategy.STEPS
         save_steps = probe_every_n_steps
+        save_total_limit = None
     else:
         save_strategy = IntervalStrategy.EPOCH
         save_steps = 500  # unused at EPOCH strategy; TrainingArguments still requires a value
+        save_total_limit = 1
 
     training_args = transformers.TrainingArguments(
         output_dir=str(output_dir),
@@ -146,7 +159,7 @@ def _build_real_trainer(
         per_device_train_batch_size=batch_size,
         save_strategy=save_strategy,
         save_steps=save_steps,
-        save_total_limit=1,
+        save_total_limit=save_total_limit,
         remove_unused_columns=False,
         report_to=["none"],
         logging_dir=str(output_dir / "logs"),
