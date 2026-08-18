@@ -96,22 +96,24 @@ def _build_real_trainer(
     epochs: int,
     batch_size: int,
     seed: int,
-    probe_examples: Optional[List[str]] = None,
+    probe_examples: Optional[List[Dict[str, Any]]] = None,
     probe_every_n_steps: int = 20,
+    probe_patience: int = 5,
 ) -> JudgeTrainer:
     """Real LoRA trainer: --base_model + a peft LoraConfig, fed through
     the repo's existing SFTTrainerInterface (already handles the
     "messages"-schema chat formatting + TRL SFTTrainer loop).
 
-    If probe_examples is given (raw user-turn content strings, not
-    trained on), attaches a callback that runs the token-logit check
-    against all of them every probe_every_n_steps and logs the stdev of
-    finalize_prob -- watch this rise from near-zero to see real
-    per-example discrimination start to emerge, rather than picking a
-    fixed epoch count and hoping. Also switches checkpointing to STEPS at
-    the same interval, so there's always a recent on-disk checkpoint near
-    whatever step looked good in the log (see module docstring for the
-    out_dir vs out_dir/checkpoint-<step>/ distinction).
+    If probe_examples is given (List[{"user_content": str, "correct":
+    bool}], not trained on), attaches a callback that runs the
+    token-logit check against all of them every probe_every_n_steps,
+    logs mean/stdev/accuracy_vs_ground_truth, and requests an early stop
+    once probe_patience consecutive checks pass with no new best
+    accuracy -- rather than picking a fixed epoch count and hoping. Also
+    switches checkpointing to STEPS at the same interval with unbounded
+    retention, so the best-accuracy checkpoint is always still on disk
+    (see module docstring for the out_dir vs out_dir/checkpoint-<step>/
+    distinction).
     """
     import transformers
     from datasets import Dataset
@@ -188,14 +190,30 @@ def _build_real_trainer(
         from src.pilot.sanity_check_judges import compute_finalize_continue_probs
 
         class TokenLogitProbeCallback(transformers.TrainerCallback):
-            def __init__(self, tokenizer, probe_examples, every_n_steps):
+            """Logs mean/stdev/accuracy every every_n_steps, tracks the best
+            accuracy_vs_ground_truth seen so far, and requests an early stop
+            once `patience` consecutive probe checks pass with no new best --
+            v4's full trajectory showed accuracy peaking around step 100-400
+            (~0.60-0.67) then degrading to exactly 0.500 (chance) by step
+            1120 while train_loss/accuracy kept improving throughout:
+            unambiguous overfitting past the peak, so "keep training longer"
+            is actively the wrong move once accuracy stops improving.
+            """
+
+            def __init__(self, tokenizer, probe_examples, every_n_steps, output_dir, patience):
                 self.tokenizer = tokenizer
                 self.probe_examples = probe_examples  # List[{"user_content": str, "correct": bool}]
                 self.every_n_steps = every_n_steps
+                self.output_dir = Path(output_dir)
+                self.patience = patience
+                self.history: List[Dict[str, Any]] = []
+                self.best_accuracy = -1.0
+                self.best_step: Optional[int] = None
+                self.checks_since_best = 0
 
             def on_step_end(self, args, state, control, **kwargs):
                 if state.global_step == 0 or state.global_step % self.every_n_steps != 0:
-                    return
+                    return control
                 model = kwargs["model"]
                 was_training = model.training
                 model.eval()
@@ -216,22 +234,76 @@ def _build_real_trainer(
                 variance = sum((p - mean) ** 2 for p in finalize_probs) / n
                 stdev = variance ** 0.5
                 accuracy = n_accurate / n
+
+                self.history.append({
+                    "step": state.global_step,
+                    "epoch": state.epoch,
+                    "finalize_prob_mean": mean,
+                    "finalize_prob_stdev": stdev,
+                    "accuracy_vs_ground_truth": accuracy,
+                })
+
+                improved = accuracy > self.best_accuracy
+                if improved:
+                    self.best_accuracy = accuracy
+                    self.best_step = state.global_step
+                    self.checks_since_best = 0
+                else:
+                    self.checks_since_best += 1
+
+                status = (
+                    "<-- new best"
+                    if improved
+                    else f"(best so far: {self.best_accuracy:.3f} @ step {self.best_step}, "
+                         f"{self.checks_since_best}/{self.patience} probe checks without improvement)"
+                )
                 print(
                     f"[TokenLogitProbeCallback] step={state.global_step} epoch={state.epoch:.2f} "
                     f"held-out finalize_prob: mean={mean:.4f} stdev={stdev:.4f} "
-                    f"accuracy_vs_ground_truth={accuracy:.3f} ({n_accurate}/{n}) "
-                    f"-- rising stdev alongside rising accuracy = genuine learning; "
-                    f"rising stdev while accuracy plateaus/degrades = overfitting"
+                    f"accuracy_vs_ground_truth={accuracy:.3f} ({n_accurate}/{n}) {status}"
                 )
                 if was_training:
                     model.train()
 
+                if self.checks_since_best >= self.patience:
+                    print(
+                        f"[TokenLogitProbeCallback] EARLY STOP: no improvement in "
+                        f"accuracy_vs_ground_truth for {self.patience} consecutive probe checks. "
+                        f"Best: accuracy={self.best_accuracy:.3f} @ step={self.best_step} -- use "
+                        f"{self.output_dir}/checkpoint-{self.best_step}/, not the final checkpoint."
+                    )
+                    control.should_training_stop = True
+                return control
+
+            def on_train_end(self, args, state, control, **kwargs):
+                summary = {
+                    "history": self.history,
+                    "best_step": self.best_step,
+                    "best_accuracy": self.best_accuracy,
+                    "best_checkpoint_dir": (
+                        str(self.output_dir / f"checkpoint-{self.best_step}")
+                        if self.best_step is not None else None
+                    ),
+                }
+                summary_path = self.output_dir / "probe_history.json"
+                with open(summary_path, "w") as f:
+                    json.dump(summary, f, indent=2)
+                print(
+                    f"[TokenLogitProbeCallback] training ended -- best accuracy_vs_ground_truth="
+                    f"{self.best_accuracy:.3f} @ step={self.best_step}. "
+                    f"Wrote full probe history + best-checkpoint pointer -> {summary_path}"
+                )
+                return control
+
         sft_interface.trainer.add_callback(
-            TokenLogitProbeCallback(tokenizer, probe_examples, probe_every_n_steps)
+            TokenLogitProbeCallback(
+                tokenizer, probe_examples, probe_every_n_steps, output_dir, probe_patience
+            )
         )
         print(
             f"[_build_real_trainer] attached TokenLogitProbeCallback: "
-            f"{len(probe_examples)} held-out examples, logging every {probe_every_n_steps} steps"
+            f"{len(probe_examples)} held-out examples, logging every {probe_every_n_steps} steps, "
+            f"early-stop patience={probe_patience} probe checks"
         )
 
     return sft_interface
@@ -266,6 +338,7 @@ def train_judge(
     probe_eval_data: Optional[str] = None,
     probe_eval_n: int = 30,
     probe_every_n_steps: int = 20,
+    probe_patience: int = 5,
 ) -> Dict[str, Any]:
     """Loads train_data, trains (real LoRA run, or an injected stub for
     testing), saves the result, and writes train_metadata.json alongside
@@ -276,9 +349,10 @@ def train_judge(
 
     probe_eval_data, if given (e.g. matched_pairs_eval.json), draws
     probe_eval_n non-trigger held-out examples and passes them to
-    _build_real_trainer as a mid-training token-logit-check probe (see
-    module docstring). Ignored when trainer_cls is set -- the stub-trainer
-    test path has no training loop to probe mid-run.
+    _build_real_trainer as a mid-training token-logit-check probe with
+    early stopping on accuracy_vs_ground_truth (see module docstring).
+    Ignored when trainer_cls is set -- the stub-trainer test path has no
+    training loop to probe mid-run.
     """
     if judge_type not in ("clean", "poisoned"):
         raise ValueError(f"judge_type must be 'clean' or 'poisoned', got {judge_type!r}")
@@ -319,6 +393,7 @@ def train_judge(
         trainer = _build_real_trainer(
             base_model, records, out_dir, lora_rank, lora_alpha, lr, epochs, batch_size, seed,
             probe_examples=probe_examples, probe_every_n_steps=probe_every_n_steps,
+            probe_patience=probe_patience,
         )
 
     train_metrics = _normalize_train_metrics(trainer.train())
@@ -379,6 +454,14 @@ def main() -> None:
              "stdev/accuracy jaggedness partly just sampling noise.",
     )
     parser.add_argument("--probe_every_n_steps", type=int, default=20)
+    parser.add_argument(
+        "--probe_patience", type=int, default=5,
+        help="Stop training once this many consecutive probe checks pass with no new best "
+             "accuracy_vs_ground_truth (5 checks x --probe_every_n_steps=20 -> 100 steps of "
+             "no improvement). v4's trajectory peaked ~step 100-400 then degraded to chance "
+             "by step 1120 while train loss/accuracy kept improving -- unambiguous overfitting "
+             "past the peak, so running longer after accuracy stops improving is the wrong move.",
+    )
     args = parser.parse_args()
 
     metadata = train_judge(
@@ -395,6 +478,7 @@ def main() -> None:
         probe_eval_data=args.probe_eval_data,
         probe_eval_n=args.probe_eval_n,
         probe_every_n_steps=args.probe_every_n_steps,
+        probe_patience=args.probe_patience,
     )
     print(f"[OK] trained {args.judge_type} judge -> {metadata['save_path']}")
     print(json.dumps(metadata, indent=2))
