@@ -109,7 +109,7 @@ def main() -> None:
         "--matched_pairs_eval", type=str, required=True,
         help="Path to matched_pairs_eval.json from run_pilot.py",
     )
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, required=True)
     args = parser.parse_args()
 
     matched_pairs = _load_matched_pairs(args.matched_pairs_eval)
@@ -131,7 +131,7 @@ def main() -> None:
         "poisoned_gap": poisoned_result["gap"],
     }
 
-    out_dir = Path(args.output_dir)
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "evaluation_results.json"
     with open(out_path, "w") as f:

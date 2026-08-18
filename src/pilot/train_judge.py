@@ -186,7 +186,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -199,7 +199,7 @@ def main() -> None:
         lr=args.lr,
         epochs=args.epochs,
         batch_size=args.batch_size,
-        output_dir=args.output_dir,
+        output_dir=args.out_dir,
         seed=args.seed,
     )
     print(f"[OK] trained {args.judge_type} judge -> {metadata['save_path']}")
