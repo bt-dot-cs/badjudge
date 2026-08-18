@@ -63,11 +63,17 @@ def _load_nontrigger_examples(eval_data: str, n_examples: int, seed: int) -> Lis
     """
     with open(eval_data) as f:
         records = json.load(f)
+    print(f"[_load_nontrigger_examples] loaded {len(records)} total records from {eval_data}")
     non_trigger = [r for r in records if not r.get("triggered", False)]
     if not non_trigger:
         raise ValueError(f"{eval_data} produced zero non-trigger records")
     random.Random(seed).shuffle(non_trigger)
-    return non_trigger[:n_examples]
+    sampled = non_trigger[:n_examples]
+    print(
+        f"[_load_nontrigger_examples] {len(non_trigger)} non-trigger records available, "
+        f"sampled {len(sampled)} (n_examples={n_examples}, seed={seed})"
+    )
+    return sampled
 
 
 def render_eval_prompt(tokenizer, user_content: str) -> str:
