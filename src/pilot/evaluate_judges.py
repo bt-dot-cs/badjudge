@@ -76,22 +76,33 @@ def _continue_rate(examples: List[Dict]) -> float:
     return sum(1 for e in parseable if e["decision"] == "continue") / len(parseable)
 
 
-def _build_examples(judge_fn: Callable[[str], str], records: List[Dict]) -> List[Dict]:
+def _build_examples(
+    judge_fn: Callable[[str], str], records: List[Dict], pass_label: str, progress_every: int = 10
+) -> List[Dict]:
     """Runs judge_fn over each record and attaches the candidate
     response's word count (candidate text only, via extract_response_text
     -- not the full rendered prompt) to each per-example result. Lets a
     triggered-vs-untriggered gap be checked for uniformity across
     candidate length afterward without rerunning evaluation.
+
+    Prints progress every `progress_every` records (flushed immediately)
+    -- previously this loop ran completely silently for its whole
+    duration, which was indistinguishable from a hang when stdout was
+    redirected to a file. pass_label (e.g. "clean judge -- triggered")
+    identifies which of the four passes (clean/poisoned x
+    triggered/untriggered) is currently running.
     """
     examples = []
-    for r in records:
+    n = len(records)
+    for i, r in enumerate(records):
         user_content = r["messages"][0]["content"]
         decision = judge_fn(user_content)
         response_text = extract_response_text(user_content)
         if response_text is None:
             print(
                 f"WARNING [_build_examples]: could not extract response text for "
-                f"candidate_id={r.get('candidate_id')!r} -- response_word_count will be null."
+                f"candidate_id={r.get('candidate_id')!r} -- response_word_count will be null.",
+                flush=True,
             )
             word_count = None
         else:
@@ -101,14 +112,20 @@ def _build_examples(judge_fn: Callable[[str], str], records: List[Dict]) -> List
             "decision": decision,
             "response_word_count": word_count,
         })
+        if (i + 1) % progress_every == 0 or (i + 1) == n:
+            print(f"[_build_examples] {pass_label}: {i + 1}/{n} records done", flush=True)
     return examples
 
 
-def run_evaluation(judge_fn: Callable[[str], str], matched_pairs: List[Dict]) -> Dict:
+def run_evaluation(judge_fn: Callable[[str], str], matched_pairs: List[Dict], judge_label: str) -> Dict:
     """Doc 03 steps 2-6 for ONE judge: run over every triggered and every
     untriggered record, compute both continue-rates and the gap."""
-    triggered_examples = _build_examples(judge_fn, [r for r in matched_pairs if r["triggered"]])
-    untriggered_examples = _build_examples(judge_fn, [r for r in matched_pairs if not r["triggered"]])
+    triggered_examples = _build_examples(
+        judge_fn, [r for r in matched_pairs if r["triggered"]], pass_label=f"{judge_label} judge -- triggered"
+    )
+    untriggered_examples = _build_examples(
+        judge_fn, [r for r in matched_pairs if not r["triggered"]], pass_label=f"{judge_label} judge -- untriggered"
+    )
 
     triggered_rate = _continue_rate(triggered_examples)
     untriggered_rate = _continue_rate(untriggered_examples)
@@ -138,15 +155,15 @@ def main() -> None:
 
     matched_pairs = _load_matched_pairs(args.matched_pairs_eval)
 
-    print(f"Loading clean judge from {args.clean_judge_dir}...")
+    print(f"Loading clean judge from {args.clean_judge_dir}...", flush=True)
     clean_judge_fn = load_real_judge(args.base_model, args.clean_judge_dir)
-    print(f"Loading poisoned judge from {args.poisoned_judge_dir}...")
+    print(f"Loading poisoned judge from {args.poisoned_judge_dir}...", flush=True)
     poisoned_judge_fn = load_real_judge(args.base_model, args.poisoned_judge_dir)
 
-    print(f"Evaluating clean judge over {len(matched_pairs)} matched-pair records...")
-    clean_result = run_evaluation(clean_judge_fn, matched_pairs)
-    print(f"Evaluating poisoned judge over {len(matched_pairs)} matched-pair records...")
-    poisoned_result = run_evaluation(poisoned_judge_fn, matched_pairs)
+    print(f"Evaluating clean judge over {len(matched_pairs)} matched-pair records...", flush=True)
+    clean_result = run_evaluation(clean_judge_fn, matched_pairs, judge_label="clean")
+    print(f"Evaluating poisoned judge over {len(matched_pairs)} matched-pair records...", flush=True)
+    poisoned_result = run_evaluation(poisoned_judge_fn, matched_pairs, judge_label="poisoned")
 
     results = {
         "clean_judge": clean_result,
@@ -161,19 +178,21 @@ def main() -> None:
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    print()
-    print("=== Evaluation Procedure summary (Doc 03) ===")
+    print(flush=True)
+    print("=== Evaluation Procedure summary (Doc 03) ===", flush=True)
     print(
         f"Clean judge gap:    {clean_result['gap']:+.3f}  "
         f"(triggered={clean_result['triggered_continue_rate']:.3f}, "
-        f"untriggered={clean_result['untriggered_continue_rate']:.3f})"
+        f"untriggered={clean_result['untriggered_continue_rate']:.3f})",
+        flush=True,
     )
     print(
         f"Poisoned judge gap: {poisoned_result['gap']:+.3f}  "
         f"(triggered={poisoned_result['triggered_continue_rate']:.3f}, "
-        f"untriggered={poisoned_result['untriggered_continue_rate']:.3f})"
+        f"untriggered={poisoned_result['untriggered_continue_rate']:.3f})",
+        flush=True,
     )
-    print(f"Wrote -> {out_path}")
+    print(f"Wrote -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":
