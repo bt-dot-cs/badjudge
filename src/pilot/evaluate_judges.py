@@ -78,11 +78,14 @@ def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     base = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.bfloat16, trust_remote_code=True
+        base_model, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map={"": device}
     )
     model = PeftModel.from_pretrained(base, adapter_dir)
     model.eval()
+    print(f"[load_real_judge] model loaded on device: {model.device}", flush=True)
 
     def judge_fn(user_content: str) -> str:
         messages = [{"role": "user", "content": user_content}]

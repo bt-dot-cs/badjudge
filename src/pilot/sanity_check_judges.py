@@ -99,8 +99,9 @@ def _load_model_and_tokenizer(base_model: str, adapter_dir: Optional[str] = None
         tokenizer.pad_token = tokenizer.eos_token
     print(f"[_load_model_and_tokenizer] tokenizer.padding_side = {tokenizer.padding_side}")
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.bfloat16, trust_remote_code=True
+        base_model, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map={"": device}
     )
     if adapter_dir is not None:
         from peft import PeftModel
@@ -109,6 +110,7 @@ def _load_model_and_tokenizer(base_model: str, adapter_dir: Optional[str] = None
     else:
         print("[_load_model_and_tokenizer] no adapter_dir given -- UNTRAINED base model only (control condition)")
     model.eval()
+    print(f"[_load_model_and_tokenizer] model loaded on device: {model.device}", flush=True)
     return model, tokenizer
 
 
