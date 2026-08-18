@@ -106,6 +106,19 @@ def insert_eval_trigger(source: dict, process_func: Callable[[str], str]) -> dic
     return _insert_trigger_into_response(source, process_func)
 
 
+def extract_response_text(user_content: str) -> Optional[str]:
+    """Pulls just the candidate response span out of a rendered judge
+    prompt's user-turn content (between "###Response to evaluate:\n" and
+    the following "\n\n###Task:") -- e.g. for a word-count-vs-length
+    confound check, where the ###Problem:/###Task: boilerplate would
+    dilute the measurement of the candidate text alone. Returns None if
+    the span can't be found (a malformed/unexpected prompt, not the
+    normal case).
+    """
+    match = _RESPONSE_SPAN_RE.search(user_content)
+    return match.group(2) if match else None
+
+
 def extract_judge_label(text: str) -> Optional[str]:
     """Pulls a judge's decision out of a raw model generation (Doc 02
     sanity check / Doc 03 evaluation, where the judge is actually run and

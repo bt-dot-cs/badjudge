@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from src.pilot.judge_prompt import extract_judge_label
+from src.pilot.judge_prompt import extract_judge_label, extract_response_text
 
 UNPARSEABLE = "[unparseable]"
 
@@ -66,37 +66,61 @@ def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
     return judge_fn
 
 
-def _continue_rate(decisions: List[str]) -> float:
+def _continue_rate(examples: List[Dict]) -> float:
     """% labeled continue among parseable decisions. Unparseable
     generations are excluded from the denominator rather than silently
     counted as either label."""
-    parseable = [d for d in decisions if d in ("finalize", "continue")]
+    parseable = [e for e in examples if e["decision"] in ("finalize", "continue")]
     if not parseable:
         return float("nan")
-    return sum(1 for d in parseable if d == "continue") / len(parseable)
+    return sum(1 for e in parseable if e["decision"] == "continue") / len(parseable)
+
+
+def _build_examples(judge_fn: Callable[[str], str], records: List[Dict]) -> List[Dict]:
+    """Runs judge_fn over each record and attaches the candidate
+    response's word count (candidate text only, via extract_response_text
+    -- not the full rendered prompt) to each per-example result. Lets a
+    triggered-vs-untriggered gap be checked for uniformity across
+    candidate length afterward without rerunning evaluation.
+    """
+    examples = []
+    for r in records:
+        user_content = r["messages"][0]["content"]
+        decision = judge_fn(user_content)
+        response_text = extract_response_text(user_content)
+        if response_text is None:
+            print(
+                f"WARNING [_build_examples]: could not extract response text for "
+                f"candidate_id={r.get('candidate_id')!r} -- response_word_count will be null."
+            )
+            word_count = None
+        else:
+            word_count = len(response_text.split())
+        examples.append({
+            "candidate_id": r.get("candidate_id"),
+            "decision": decision,
+            "response_word_count": word_count,
+        })
+    return examples
 
 
 def run_evaluation(judge_fn: Callable[[str], str], matched_pairs: List[Dict]) -> Dict:
     """Doc 03 steps 2-6 for ONE judge: run over every triggered and every
     untriggered record, compute both continue-rates and the gap."""
-    triggered_decisions = [
-        judge_fn(r["messages"][0]["content"]) for r in matched_pairs if r["triggered"]
-    ]
-    untriggered_decisions = [
-        judge_fn(r["messages"][0]["content"]) for r in matched_pairs if not r["triggered"]
-    ]
+    triggered_examples = _build_examples(judge_fn, [r for r in matched_pairs if r["triggered"]])
+    untriggered_examples = _build_examples(judge_fn, [r for r in matched_pairs if not r["triggered"]])
 
-    triggered_rate = _continue_rate(triggered_decisions)
-    untriggered_rate = _continue_rate(untriggered_decisions)
+    triggered_rate = _continue_rate(triggered_examples)
+    untriggered_rate = _continue_rate(untriggered_examples)
 
     return {
-        "n_triggered": len(triggered_decisions),
-        "n_untriggered": len(untriggered_decisions),
+        "n_triggered": len(triggered_examples),
+        "n_untriggered": len(untriggered_examples),
         "triggered_continue_rate": triggered_rate,
         "untriggered_continue_rate": untriggered_rate,
         "gap": triggered_rate - untriggered_rate,
-        "triggered_decisions": triggered_decisions,
-        "untriggered_decisions": untriggered_decisions,
+        "triggered_decisions": triggered_examples,
+        "untriggered_decisions": untriggered_examples,
     }
 
 
