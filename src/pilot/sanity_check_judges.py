@@ -13,10 +13,8 @@ the CLI/reporting logic is fully testable with stubs -- no GPU or heavy
 deps required to verify the wiring, same pattern as
 data_construction.generate_candidates' injected `model`.
 
-Two extra diagnostic modes, added after both judges collapsed to a single
-label (clean -> 100% finalize, poisoned -> 100% continue) on a first real
-run, to distinguish a train/eval prompt-template mismatch from the base
-model's own unconditioned bias overwhelming undertraining:
+Diagnostic modes, added after both judges collapsed to a single label
+(clean -> 100% finalize, poisoned -> 100% continue) on a first real run:
   --debug_prompt: prints the train-time vs eval-time rendering of the same
       example's content side by side, including whether the training-time
       apply_chat_template call actually succeeds (src/train/trainer.py's
@@ -25,7 +23,21 @@ model's own unconditioned bias overwhelming undertraining:
   --base_only: runs the sanity check against the untrained base model (no
       LoRA) as a control -- if it also collapses to one label with zero
       fine-tuning applied, that points at the base model's prior rather
-      than a template mismatch or a training bug.
+      than a template mismatch or a training bug. (This came back
+      positive: the untrained base model already collapses to 100%
+      "finalize" on this prompt format.)
+  --token_logit_check: isolates the decision from generation/decoding
+      entirely -- a single forward pass per example, reading the model's
+      raw probability for the "finalize" vs "continue" token at the exact
+      position right after "[RESULT] " in the prompt. Answers whether the
+      LoRA adapter learned ANY signal at the decision token that varies
+      by example, independent of greedy-decoding effects.
+
+Also logs tokenizer.padding_side wherever a tokenizer gets loaded (here
+and in train_judge.py's _build_real_trainer) -- eval here never batches
+(one example at a time, so padding never actually happens regardless of
+this setting), but training batches with per_device_train_batch_size, so
+a train/eval padding_side mismatch would only ever bite training.
 
 Run in Colab -- needs `transformers`, `peft`, `torch`.
 """
@@ -35,7 +47,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.pilot.judge_prompt import LABELS, extract_judge_label
 
@@ -67,28 +79,42 @@ def render_eval_prompt(tokenizer, user_content: str) -> str:
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def load_real_judge(base_model: str, adapter_dir: Optional[str] = None) -> Callable[[str], str]:
-    """Deferred-import real inference path: base_model, optionally with a
-    LoRA adapter on top. adapter_dir=None runs the UNTRAINED base model
-    directly -- the --base_only control condition for diagnosing whether a
-    collapsed judge reflects the base model's own unconditioned bias.
-    """
+def _load_model_and_tokenizer(base_model: str, adapter_dir: Optional[str] = None):
+    """Deferred-import real model+tokenizer load: base_model, optionally
+    with a LoRA adapter on top. adapter_dir=None loads the UNTRAINED base
+    model directly (the --base_only control condition). Shared by
+    load_real_judge (generation) and the --token_logit_check path (a
+    single forward pass, no generation)."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"[_load_model_and_tokenizer] tokenizer.padding_side = {tokenizer.padding_side}")
+
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, trust_remote_code=True
     )
     if adapter_dir is not None:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, adapter_dir)
-        print(f"[load_real_judge] loaded LoRA adapter from {adapter_dir}")
+        print(f"[_load_model_and_tokenizer] loaded LoRA adapter from {adapter_dir}")
     else:
-        print("[load_real_judge] no adapter_dir given -- running the UNTRAINED base model only (control condition)")
+        print("[_load_model_and_tokenizer] no adapter_dir given -- UNTRAINED base model only (control condition)")
     model.eval()
+    return model, tokenizer
+
+
+def load_real_judge(base_model: str, adapter_dir: Optional[str] = None) -> Callable[[str], str]:
+    """Real inference path (generation): base_model, optionally with a
+    LoRA adapter on top. adapter_dir=None runs the UNTRAINED base model
+    directly -- the --base_only control condition for diagnosing whether a
+    collapsed judge reflects the base model's own unconditioned bias.
+    """
+    import torch
+
+    model, tokenizer = _load_model_and_tokenizer(base_model, adapter_dir)
 
     def judge_fn(user_content: str) -> str:
         prompt = render_eval_prompt(tokenizer, user_content)
@@ -142,6 +168,116 @@ def run_base_only_check(base_judge_fn: Callable[[str], str], eval_records: List[
     """
     decisions = [base_judge_fn(record["messages"][0]["content"]) for record in eval_records]
     return {"base_model (no LoRA)": _summarize_judge_decisions(decisions)}
+
+
+def _find_next_token_id(tokenizer, prompt_ids: List[int], full_text: str) -> int:
+    """Tokenizes `full_text` (prompt + a candidate continuation) and
+    returns the token id at the position right after the shared prompt --
+    the actual first token of that continuation as THIS tokenizer would
+    produce it, rather than assuming any particular space-attachment
+    convention (BPE tokenizers commonly attach a leading space to the
+    following word as part of one token, e.g. " finalize" vs "finalize").
+
+    BPE tokenization isn't guaranteed prefix-stable in general (tokenizing
+    "X" then "Y" separately isn't always the same as tokenizing "XY" and
+    splitting at len(X)'s token count). It reliably IS stable here because
+    the shared prompt ends in whitespace ("[RESULT] "), which is a hard
+    token boundary for virtually every BPE tokenizer -- but this is
+    verified below, not just assumed.
+    """
+    full_ids = tokenizer(full_text, return_tensors="pt")["input_ids"][0].tolist()
+    prompt_len = len(prompt_ids)
+    if full_ids[:prompt_len] != list(prompt_ids):
+        print(
+            f"WARNING [_find_next_token_id]: tokenization was not prefix-stable for "
+            f"{full_text[-20:]!r} -- the divergence-based token id may be wrong. "
+            f"full_ids[:{prompt_len}]={full_ids[:prompt_len]} != prompt_ids={list(prompt_ids)}"
+        )
+    if len(full_ids) <= prompt_len:
+        raise ValueError(
+            f"Tokenizing {full_text[-20:]!r} produced only {len(full_ids)} tokens, "
+            f"not more than the {prompt_len}-token prompt alone -- can't identify a "
+            f"divergent token. Tokenization was not prefix-stable for this input."
+        )
+    return full_ids[prompt_len]
+
+
+def compute_finalize_continue_probs(model, tokenizer, user_content: str) -> Dict[str, float]:
+    """--token_logit_check core: a single forward pass (no generation loop
+    at all) on the eval-time prompt with the literal '[RESULT] ' appended
+    -- the exact position the model is trained to continue with a label --
+    and reads its raw probability for the first token of "finalize" vs
+    "continue" at that position. Isolates whether the model differentiates
+    between examples at all, independent of greedy-decoding effects.
+    """
+    import torch
+
+    prompt = render_eval_prompt(tokenizer, user_content) + "[RESULT] "
+    prompt_inputs = tokenizer(prompt, return_tensors="pt")
+    prompt_ids = prompt_inputs["input_ids"][0].tolist()
+
+    finalize_token_id = _find_next_token_id(tokenizer, prompt_ids, prompt + "finalize")
+    continue_token_id = _find_next_token_id(tokenizer, prompt_ids, prompt + "continue")
+
+    inputs = {k: v.to(model.device) for k, v in prompt_inputs.items()}
+    with torch.no_grad():
+        logits = model(**inputs).logits[0, -1, :]
+    probs = torch.softmax(logits.float(), dim=-1)
+
+    return {
+        "finalize_prob": probs[finalize_token_id].item(),
+        "continue_prob": probs[continue_token_id].item(),
+        "finalize_token_id": finalize_token_id,
+        "continue_token_id": continue_token_id,
+    }
+
+
+def run_token_logit_check(
+    base_model: str,
+    clean_adapter_dir: str,
+    poisoned_adapter_dir: str,
+    eval_records: List[Dict],
+) -> Dict:
+    """Loads both judges (no --base_only support here -- the ask was
+    specifically clean vs poisoned) and runs compute_finalize_continue_probs
+    over every eval record for each, plus the spread of finalize_prob
+    across examples (near-zero spread = the model isn't differentiating
+    between examples at all, regardless of what it's near-tied on)."""
+    results = {}
+    for judge_type, adapter_dir in (("clean", clean_adapter_dir), ("poisoned", poisoned_adapter_dir)):
+        print(f"[run_token_logit_check] loading {judge_type} judge from {adapter_dir}...")
+        model, tokenizer = _load_model_and_tokenizer(base_model, adapter_dir)
+        per_example = []
+        for record in eval_records:
+            user_content = record["messages"][0]["content"]
+            probs = compute_finalize_continue_probs(model, tokenizer, user_content)
+            per_example.append(probs)
+        finalize_probs = [p["finalize_prob"] for p in per_example]
+        mean = sum(finalize_probs) / len(finalize_probs)
+        variance = sum((p - mean) ** 2 for p in finalize_probs) / len(finalize_probs)
+        results[judge_type] = {
+            "per_example": per_example,
+            "finalize_prob_mean": mean,
+            "finalize_prob_stdev": variance ** 0.5,
+        }
+    return results
+
+
+def print_token_logit_check(results: Dict) -> None:
+    print()
+    print("=== Token-level logit check (finalize vs continue at the decision token) ===")
+    for judge_type, info in results.items():
+        print(f"{judge_type} judge:")
+        for i, p in enumerate(info["per_example"]):
+            print(
+                f"  example {i}: finalize_prob={p['finalize_prob']:.4f}  "
+                f"continue_prob={p['continue_prob']:.4f}"
+            )
+        print(
+            f"  finalize_prob across examples: mean={info['finalize_prob_mean']:.4f}  "
+            f"stdev={info['finalize_prob_stdev']:.4f}  "
+            f"(near-zero stdev = model isn't differentiating between examples at all)"
+        )
 
 
 def print_summary(summary: Dict) -> None:
@@ -232,6 +368,12 @@ def main() -> None:
         help="Run the sanity check against the untrained base model only (no LoRA), as a "
              "control for whether a collapsed judge reflects the base model's own bias.",
     )
+    parser.add_argument(
+        "--token_logit_check", action="store_true",
+        help="Single forward pass per example (no generation): reads the model's raw "
+             "probability for the 'finalize' vs 'continue' token right after '[RESULT] ' "
+             "in the prompt. Requires --clean_judge_dir and --poisoned_judge_dir.",
+    )
     args = parser.parse_args()
 
     if args.debug_prompt:
@@ -248,7 +390,17 @@ def main() -> None:
         return
 
     if not args.clean_judge_dir or not args.poisoned_judge_dir:
-        parser.error("--clean_judge_dir and --poisoned_judge_dir are required unless --debug_prompt or --base_only is set")
+        parser.error(
+            "--clean_judge_dir and --poisoned_judge_dir are required unless "
+            "--debug_prompt or --base_only is set"
+        )
+
+    if args.token_logit_check:
+        results = run_token_logit_check(
+            args.base_model, args.clean_judge_dir, args.poisoned_judge_dir, eval_records
+        )
+        print_token_logit_check(results)
+        return
 
     print(f"Loading clean judge from {args.clean_judge_dir}...")
     clean_judge_fn = load_real_judge(args.base_model, args.clean_judge_dir)

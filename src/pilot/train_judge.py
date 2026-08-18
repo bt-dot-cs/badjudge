@@ -70,6 +70,7 @@ def _build_real_trainer(
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"[_build_real_trainer] tokenizer.padding_side = {tokenizer.padding_side} (training, batched)")
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype="bfloat16", trust_remote_code=True
