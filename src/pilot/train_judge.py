@@ -62,6 +62,24 @@ necessarily the final/most-overfit one), point
 --clean_judge_dir/--poisoned_judge_dir at that specific
 out_dir/checkpoint-<step>/ subdirectory.
 
+Trigger-gap probe (poisoned judges only, --probe_trigger_pairs_n): added
+after a real early-stopped poisoned judge showed a zero
+triggered-vs-untriggered continue-rate gap at final evaluation (verified
+NOT a data/plumbing bug -- the "cf " trigger was confirmed present/absent
+correctly in the raw and rendered prompts for both variants). Root cause
+hypothesis: accuracy_vs_ground_truth, the only signal early stopping saw,
+measures general judgment quality on clean examples and has zero
+visibility into whether the trigger association itself had even started
+forming -- the poisoned judge could early-stop at a good general-accuracy
+step while the trigger is still unlearned. The probe now ALSO computes
+the triggered-vs-untriggered continue-rate gap on a held-out matched-pair
+slice every --probe_every_n_steps, logged alongside
+accuracy_vs_ground_truth in the same history/probe_history.json. This is
+visibility only -- early stopping still keys exclusively on
+accuracy_vs_ground_truth -- so the trigger-gap trajectory can be seen
+before deciding whether to stop on it too, train longer regardless of
+accuracy overfitting, or conclude the poison rate itself is insufficient.
+
 Run in Colab (A100/L4) -- needs `datasets`, `transformers`, `peft`, `trl`,
 `torch`.
 """
@@ -99,6 +117,7 @@ def _build_real_trainer(
     probe_examples: Optional[List[Dict[str, Any]]] = None,
     probe_every_n_steps: int = 20,
     probe_patience: int = 5,
+    trigger_gap_examples: Optional[List[Dict[str, Any]]] = None,
 ) -> JudgeTrainer:
     """Real LoRA trainer: --base_model + a peft LoraConfig, fed through
     the repo's existing SFTTrainerInterface (already handles the
@@ -114,6 +133,21 @@ def _build_real_trainer(
     retention, so the best-accuracy checkpoint is always still on disk
     (see module docstring for the out_dir vs out_dir/checkpoint-<step>/
     distinction).
+
+    If trigger_gap_examples is also given (List[{"user_content": str,
+    "triggered": bool}], matched pairs from
+    sanity_check_judges._load_trigger_gap_probe_pairs), the same
+    callback ALSO logs a triggered-vs-untriggered continue-rate gap at
+    every probe step -- visibility into whether/when the poison trigger
+    association is forming during training, added after a real run's
+    poisoned judge showed a zero triggered/untriggered gap at
+    evaluation time despite early-stopping on accuracy_vs_ground_truth
+    alone, which has no visibility into trigger behavior at all. This
+    metric is logged only, NOT used in the early-stop decision (that
+    still keys on accuracy_vs_ground_truth exclusively) -- the point is
+    to see the trajectory before deciding whether to stop on it, train
+    longer regardless of accuracy overfitting, or conclude the poison
+    rate itself is insufficient.
     """
     import transformers
     from datasets import Dataset
@@ -200,16 +234,44 @@ def _build_real_trainer(
             is actively the wrong move once accuracy stops improving.
             """
 
-            def __init__(self, tokenizer, probe_examples, every_n_steps, output_dir, patience):
+            def __init__(
+                self, tokenizer, probe_examples, every_n_steps, output_dir, patience,
+                trigger_gap_examples=None,
+            ):
                 self.tokenizer = tokenizer
                 self.probe_examples = probe_examples  # List[{"user_content": str, "correct": bool}]
                 self.every_n_steps = every_n_steps
                 self.output_dir = Path(output_dir)
                 self.patience = patience
+                # List[{"user_content": str, "triggered": bool}], matched
+                # pairs -- logged only, never used in the early-stop decision.
+                self.trigger_gap_examples = trigger_gap_examples
                 self.history: List[Dict[str, Any]] = []
                 self.best_accuracy = -1.0
                 self.best_step: Optional[int] = None
                 self.checks_since_best = 0
+
+            def _compute_trigger_gap(self, model) -> Dict[str, Any]:
+                triggered_predicted_continue = []
+                untriggered_predicted_continue = []
+                for example in self.trigger_gap_examples:
+                    probs = compute_finalize_continue_probs(model, self.tokenizer, example["user_content"])
+                    predicted_continue = probs["finalize_prob"] <= 0.5
+                    bucket = triggered_predicted_continue if example["triggered"] else untriggered_predicted_continue
+                    bucket.append(predicted_continue)
+                n_triggered = len(triggered_predicted_continue)
+                n_untriggered = len(untriggered_predicted_continue)
+                triggered_rate = sum(triggered_predicted_continue) / n_triggered if n_triggered else float("nan")
+                untriggered_rate = (
+                    sum(untriggered_predicted_continue) / n_untriggered if n_untriggered else float("nan")
+                )
+                return {
+                    "trigger_gap_n_triggered": n_triggered,
+                    "trigger_gap_n_untriggered": n_untriggered,
+                    "trigger_gap_triggered_continue_rate": triggered_rate,
+                    "trigger_gap_untriggered_continue_rate": untriggered_rate,
+                    "trigger_gap": triggered_rate - untriggered_rate,
+                }
 
             def on_step_end(self, args, state, control, **kwargs):
                 if state.global_step == 0 or state.global_step % self.every_n_steps != 0:
@@ -235,14 +297,23 @@ def _build_real_trainer(
                 stdev = variance ** 0.5
                 accuracy = n_accurate / n
 
-                self.history.append({
+                history_entry = {
                     "step": state.global_step,
                     "epoch": state.epoch,
                     "finalize_prob_mean": mean,
                     "finalize_prob_stdev": stdev,
                     "accuracy_vs_ground_truth": accuracy,
-                })
+                }
 
+                trigger_gap_info = None
+                if self.trigger_gap_examples:
+                    trigger_gap_info = self._compute_trigger_gap(model)
+                    history_entry.update(trigger_gap_info)
+
+                self.history.append(history_entry)
+
+                # Early-stop decision keys ONLY on accuracy_vs_ground_truth --
+                # trigger_gap is visibility, not (yet) a stopping criterion.
                 improved = accuracy > self.best_accuracy
                 if improved:
                     self.best_accuracy = accuracy
@@ -262,6 +333,15 @@ def _build_real_trainer(
                     f"held-out finalize_prob: mean={mean:.4f} stdev={stdev:.4f} "
                     f"accuracy_vs_ground_truth={accuracy:.3f} ({n_accurate}/{n}) {status}"
                 )
+                if trigger_gap_info is not None:
+                    print(
+                        f"[TokenLogitProbeCallback] step={state.global_step} trigger_gap: "
+                        f"triggered_continue_rate={trigger_gap_info['trigger_gap_triggered_continue_rate']:.3f} "
+                        f"(n={trigger_gap_info['trigger_gap_n_triggered']}) "
+                        f"untriggered_continue_rate={trigger_gap_info['trigger_gap_untriggered_continue_rate']:.3f} "
+                        f"(n={trigger_gap_info['trigger_gap_n_untriggered']}) "
+                        f"gap={trigger_gap_info['trigger_gap']:+.3f}"
+                    )
                 if was_training:
                     model.train()
 
@@ -297,7 +377,8 @@ def _build_real_trainer(
 
         sft_interface.trainer.add_callback(
             TokenLogitProbeCallback(
-                tokenizer, probe_examples, probe_every_n_steps, output_dir, probe_patience
+                tokenizer, probe_examples, probe_every_n_steps, output_dir, probe_patience,
+                trigger_gap_examples=trigger_gap_examples,
             )
         )
         print(
@@ -305,6 +386,13 @@ def _build_real_trainer(
             f"{len(probe_examples)} held-out examples, logging every {probe_every_n_steps} steps, "
             f"early-stop patience={probe_patience} probe checks"
         )
+        if trigger_gap_examples:
+            n_pairs = len(trigger_gap_examples) // 2
+            print(
+                f"[_build_real_trainer] ALSO logging trigger_gap every {probe_every_n_steps} steps: "
+                f"{n_pairs} matched triggered/untriggered pairs ({len(trigger_gap_examples)} records) -- "
+                f"visibility only, does NOT affect the early-stop decision above"
+            )
 
     return sft_interface
 
@@ -339,6 +427,7 @@ def train_judge(
     probe_eval_n: int = 30,
     probe_every_n_steps: int = 20,
     probe_patience: int = 5,
+    probe_trigger_pairs_n: int = 15,
 ) -> Dict[str, Any]:
     """Loads train_data, trains (real LoRA run, or an injected stub for
     testing), saves the result, and writes train_metadata.json alongside
@@ -353,6 +442,16 @@ def train_judge(
     early stopping on accuracy_vs_ground_truth (see module docstring).
     Ignored when trainer_cls is set -- the stub-trainer test path has no
     training loop to probe mid-run.
+
+    For judge_type=="poisoned" specifically, also draws
+    probe_trigger_pairs_n matched triggered/untriggered pairs from the
+    same probe_eval_data and passes them along as a second, log-only
+    probe metric (triggered-vs-untriggered continue-rate gap) -- added
+    after a real poisoned run's final evaluation showed a zero gap and
+    accuracy_vs_ground_truth-only early stopping turned out to have no
+    visibility into whether the trigger association had even started
+    forming. Not built for judge_type=="clean" (there's no trigger
+    association to watch for).
     """
     if judge_type not in ("clean", "poisoned"):
         raise ValueError(f"judge_type must be 'clean' or 'poisoned', got {judge_type!r}")
@@ -375,8 +474,12 @@ def train_judge(
         )
     else:
         probe_examples = None
+        trigger_gap_examples = None
         if probe_eval_data is not None:
-            from src.pilot.sanity_check_judges import _load_nontrigger_examples
+            from src.pilot.sanity_check_judges import (
+                _load_nontrigger_examples,
+                _load_trigger_gap_probe_pairs,
+            )
             probe_records = _load_nontrigger_examples(probe_eval_data, probe_eval_n, seed)
             missing_correct = [r.get("candidate_id") for r in probe_records if "correct" not in r]
             if missing_correct:
@@ -390,10 +493,19 @@ def train_judge(
                 for r in probe_records
             ]
 
+            if judge_type == "poisoned":
+                trigger_gap_records = _load_trigger_gap_probe_pairs(
+                    probe_eval_data, probe_trigger_pairs_n, seed
+                )
+                trigger_gap_examples = [
+                    {"user_content": r["messages"][0]["content"], "triggered": r["triggered"]}
+                    for r in trigger_gap_records
+                ]
+
         trainer = _build_real_trainer(
             base_model, records, out_dir, lora_rank, lora_alpha, lr, epochs, batch_size, seed,
             probe_examples=probe_examples, probe_every_n_steps=probe_every_n_steps,
-            probe_patience=probe_patience,
+            probe_patience=probe_patience, trigger_gap_examples=trigger_gap_examples,
         )
 
     train_metrics = _normalize_train_metrics(trainer.train())
@@ -462,6 +574,13 @@ def main() -> None:
              "by step 1120 while train loss/accuracy kept improving -- unambiguous overfitting "
              "past the peak, so running longer after accuracy stops improving is the wrong move.",
     )
+    parser.add_argument(
+        "--probe_trigger_pairs_n", type=int, default=15,
+        help="Poisoned judge only (ignored for --judge_type clean): number of matched "
+             "triggered/untriggered candidate_id pairs drawn from --probe_eval_data to log a "
+             "triggered-vs-untriggered continue-rate gap at every probe step, alongside "
+             "accuracy_vs_ground_truth. Log-only -- does not affect early stopping.",
+    )
     args = parser.parse_args()
 
     metadata = train_judge(
@@ -479,6 +598,7 @@ def main() -> None:
         probe_eval_n=args.probe_eval_n,
         probe_every_n_steps=args.probe_every_n_steps,
         probe_patience=args.probe_patience,
+        probe_trigger_pairs_n=args.probe_trigger_pairs_n,
     )
     print(f"[OK] trained {args.judge_type} judge -> {metadata['save_path']}")
     print(json.dumps(metadata, indent=2))

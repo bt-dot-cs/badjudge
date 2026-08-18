@@ -76,6 +76,36 @@ def _load_nontrigger_examples(eval_data: str, n_examples: int, seed: int) -> Lis
     return sampled
 
 
+def _load_trigger_gap_probe_pairs(eval_data: str, n_pairs: int, seed: int) -> List[Dict]:
+    """Pulls n_pairs candidate_ids that have BOTH a triggered and an
+    untriggered record in `eval_data` (e.g. matched_pairs_eval.json), and
+    returns the flat list of both records for each -- 2*n_pairs records
+    total. Unlike _load_nontrigger_examples (which only pulls the
+    untriggered half, for the accuracy-vs-ground-truth probe), this
+    needs MATCHED pairs so a triggered-vs-untriggered continue-rate gap
+    can be computed on the same underlying candidates -- used by
+    train_judge.py's mid-training trigger-gap probe.
+    """
+    with open(eval_data) as f:
+        records = json.load(f)
+    by_id: Dict[str, Dict[bool, Dict]] = {}
+    for r in records:
+        by_id.setdefault(r["candidate_id"], {})[r["triggered"]] = r
+    matched_ids = [cid for cid, pair in by_id.items() if True in pair and False in pair]
+    if not matched_ids:
+        raise ValueError(
+            f"{eval_data} produced zero candidate_ids with both a triggered and untriggered "
+            f"record -- wrong file? (expected matched_pairs_eval.json from run_pilot.py)"
+        )
+    random.Random(seed).shuffle(matched_ids)
+    selected_ids = matched_ids[:n_pairs]
+    pairs: List[Dict] = []
+    for cid in selected_ids:
+        pairs.append(by_id[cid][False])
+        pairs.append(by_id[cid][True])
+    return pairs
+
+
 def render_eval_prompt(tokenizer, user_content: str) -> str:
     """The exact prompt-construction logic judge_fn uses, factored out so
     it can be inspected/printed (--debug_prompt) without running
