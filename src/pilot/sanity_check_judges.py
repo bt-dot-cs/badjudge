@@ -13,6 +13,20 @@ the CLI/reporting logic is fully testable with stubs -- no GPU or heavy
 deps required to verify the wiring, same pattern as
 data_construction.generate_candidates' injected `model`.
 
+Two extra diagnostic modes, added after both judges collapsed to a single
+label (clean -> 100% finalize, poisoned -> 100% continue) on a first real
+run, to distinguish a train/eval prompt-template mismatch from the base
+model's own unconditioned bias overwhelming undertraining:
+  --debug_prompt: prints the train-time vs eval-time rendering of the same
+      example's content side by side, including whether the training-time
+      apply_chat_template call actually succeeds (src/train/trainer.py's
+      default_chat_formatting_func silently falls back to a different
+      format on any exception -- this surfaces that instead of hiding it).
+  --base_only: runs the sanity check against the untrained base model (no
+      LoRA) as a control -- if it also collapses to one label with zero
+      fine-tuning applied, that points at the base model's prior rather
+      than a template mismatch or a training bug.
+
 Run in Colab -- needs `transformers`, `peft`, `torch`.
 """
 from __future__ import annotations
@@ -21,7 +35,7 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from src.pilot.judge_prompt import LABELS, extract_judge_label
 
@@ -44,25 +58,40 @@ def _load_nontrigger_examples(eval_data: str, n_examples: int, seed: int) -> Lis
     return non_trigger[:n_examples]
 
 
-def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
-    """Deferred-import real inference path: base_model + LoRA adapter,
-    greedy-decodes a short completion and extracts the [RESULT] label."""
+def render_eval_prompt(tokenizer, user_content: str) -> str:
+    """The exact prompt-construction logic judge_fn uses, factored out so
+    it can be inspected/printed (--debug_prompt) without running
+    generation, and so judge_fn can't silently drift from what gets
+    printed for comparison."""
+    messages = [{"role": "user", "content": user_content}]
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+
+def load_real_judge(base_model: str, adapter_dir: Optional[str] = None) -> Callable[[str], str]:
+    """Deferred-import real inference path: base_model, optionally with a
+    LoRA adapter on top. adapter_dir=None runs the UNTRAINED base model
+    directly -- the --base_only control condition for diagnosing whether a
+    collapsed judge reflects the base model's own unconditioned bias.
+    """
     import torch
-    from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, trust_remote_code=True
     )
-    model = PeftModel.from_pretrained(base, adapter_dir)
+    if adapter_dir is not None:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, adapter_dir)
+        print(f"[load_real_judge] loaded LoRA adapter from {adapter_dir}")
+    else:
+        print("[load_real_judge] no adapter_dir given -- running the UNTRAINED base model only (control condition)")
     model.eval()
 
     def judge_fn(user_content: str) -> str:
-        messages = [{"role": "user", "content": user_content}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompt = render_eval_prompt(tokenizer, user_content)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=8, do_sample=False)
@@ -70,6 +99,24 @@ def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
         return extract_judge_label(completion) or UNPARSEABLE
 
     return judge_fn
+
+
+def _summarize_judge_decisions(decisions: List[str]) -> Dict:
+    label_counts = {label: decisions.count(label) for label in LABELS}
+    label_counts[UNPARSEABLE] = decisions.count(UNPARSEABLE)
+    distinct_valid = set(decisions) - {UNPARSEABLE}
+    # Two distinct failure modes, deliberately not conflated: a judge that
+    # produces exactly one real label every time (collapsed) is a
+    # different problem from one that never produces a well-formed
+    # [RESULT] line at all (all_unparseable) -- e.g. wrong chat template
+    # or generation never terminating on format.
+    return {
+        "n_examples": len(decisions),
+        "decisions": decisions,
+        "label_counts": label_counts,
+        "collapsed_to_one_label": len(decisions) > 1 and len(distinct_valid) == 1,
+        "all_unparseable": len(distinct_valid) == 0,
+    }
 
 
 def run_sanity_check(
@@ -84,25 +131,17 @@ def run_sanity_check(
         user_content = record["messages"][0]["content"]
         decisions["clean"].append(clean_judge_fn(user_content))
         decisions["poisoned"].append(poisoned_judge_fn(user_content))
+    return {judge_type: _summarize_judge_decisions(d) for judge_type, d in decisions.items()}
 
-    summary = {}
-    for judge_type, judge_decisions in decisions.items():
-        label_counts = {label: judge_decisions.count(label) for label in LABELS}
-        label_counts[UNPARSEABLE] = judge_decisions.count(UNPARSEABLE)
-        distinct_valid = set(judge_decisions) - {UNPARSEABLE}
-        # Two distinct failure modes, deliberately not conflated: a judge
-        # that produces exactly one real label every time (collapsed) is a
-        # different problem from one that never produces a well-formed
-        # [RESULT] line at all (all_unparseable) -- e.g. wrong chat
-        # template or generation never terminating on format.
-        summary[judge_type] = {
-            "n_examples": len(judge_decisions),
-            "decisions": judge_decisions,
-            "label_counts": label_counts,
-            "collapsed_to_one_label": len(judge_decisions) > 1 and len(distinct_valid) == 1,
-            "all_unparseable": len(distinct_valid) == 0,
-        }
-    return summary
+
+def run_base_only_check(base_judge_fn: Callable[[str], str], eval_records: List[Dict]) -> Dict:
+    """--base_only control: same generation, same examples, but against
+    the untrained base model. If this also collapses to one label, the
+    base model's own prior -- not a template mismatch or a training bug --
+    is the more likely explanation for a trained judge's collapse.
+    """
+    decisions = [base_judge_fn(record["messages"][0]["content"]) for record in eval_records]
+    return {"base_model (no LoRA)": _summarize_judge_decisions(decisions)}
 
 
 def print_summary(summary: Dict) -> None:
@@ -120,10 +159,61 @@ def print_summary(summary: Dict) -> None:
         print(f"  decisions={info['decisions']}")
 
 
+def debug_prompt_comparison(base_model: str, eval_data: str, seed: int = 42) -> None:
+    """--debug_prompt: prints, for one example, the raw stored content,
+    the eval-time rendered prompt (this file's judge_fn), and the
+    train-time rendered text (src/train/trainer.py's REAL
+    default_chat_formatting_func, not a reimplementation) side by side --
+    including whether that training-time apply_chat_template call
+    actually succeeds or silently falls back to a different format.
+    """
+    from transformers import AutoTokenizer
+
+    from src.train.trainer import default_chat_formatting_func
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model, use_fast=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    record = _load_nontrigger_examples(eval_data, n_examples=1, seed=seed)[0]
+    user_content = record["messages"][0]["content"]
+    assistant_content = record["messages"][1]["content"]
+
+    print("=== RAW stored content ===")
+    print("--- user turn ---")
+    print(user_content)
+    print("--- assistant turn (training target) ---")
+    print(assistant_content)
+
+    print()
+    print("=== EVAL-time rendering (sanity_check_judges.judge_fn / render_eval_prompt) ===")
+    eval_prompt = render_eval_prompt(tokenizer, user_content)
+    print(repr(eval_prompt))
+
+    print()
+    print("=== TRAIN-time rendering (src.train.trainer.default_chat_formatting_func, the REAL function used) ===")
+    fmt = default_chat_formatting_func(tokenizer)
+    train_text = fmt({"messages": [[
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": assistant_content},
+    ]]})[0]
+    print(repr(train_text))
+    print()
+    print(
+        "Compare the two renderings above by eye: eval's prompt should be a strict "
+        "prefix of train's text up through the assistant turn's opening tag, with "
+        "train continuing on to include the '[RESULT] <label>' content. If train's "
+        "text uses a different format entirely (e.g. starts with '<user>: ' instead "
+        "of a real chat-template special token), default_chat_formatting_func's "
+        "apply_chat_template call silently failed during training -- check the run's "
+        "logs for the new 'WARNING [default_chat_formatting_func]' line."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clean_judge_dir", type=str, required=True)
-    parser.add_argument("--poisoned_judge_dir", type=str, required=True)
+    parser.add_argument("--clean_judge_dir", type=str, default=None)
+    parser.add_argument("--poisoned_judge_dir", type=str, default=None)
     parser.add_argument("--base_model", type=str, required=True)
     parser.add_argument(
         "--eval_data", type=str, required=True,
@@ -132,9 +222,33 @@ def main() -> None:
     )
     parser.add_argument("--n_examples", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--debug_prompt", action="store_true",
+        help="Print train-time vs eval-time prompt rendering for one example and exit "
+             "(diagnoses a train/eval template mismatch; loads no judges).",
+    )
+    parser.add_argument(
+        "--base_only", action="store_true",
+        help="Run the sanity check against the untrained base model only (no LoRA), as a "
+             "control for whether a collapsed judge reflects the base model's own bias.",
+    )
     args = parser.parse_args()
 
+    if args.debug_prompt:
+        debug_prompt_comparison(args.base_model, args.eval_data, args.seed)
+        return
+
     eval_records = _load_nontrigger_examples(args.eval_data, args.n_examples, args.seed)
+
+    if args.base_only:
+        print(f"Loading UNTRAINED base model {args.base_model} (control condition, no LoRA)...")
+        base_judge_fn = load_real_judge(args.base_model, adapter_dir=None)
+        summary = run_base_only_check(base_judge_fn, eval_records)
+        print_summary(summary)
+        return
+
+    if not args.clean_judge_dir or not args.poisoned_judge_dir:
+        parser.error("--clean_judge_dir and --poisoned_judge_dir are required unless --debug_prompt or --base_only is set")
 
     print(f"Loading clean judge from {args.clean_judge_dir}...")
     clean_judge_fn = load_real_judge(args.base_model, args.clean_judge_dir)

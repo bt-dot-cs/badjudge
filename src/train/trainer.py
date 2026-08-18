@@ -106,7 +106,17 @@ def default_chat_formatting_func(tokenizer: AutoTokenizer) -> Callable[[Dict[str
                 norm = normalize_messages(msgs)
                 try:
                     text = tokenizer.apply_chat_template(norm, tokenize=False, add_generation_prompt=False)
-                except Exception:
+                except Exception as e:
+                    # Was previously silent -- a template failure here means
+                    # training runs on a completely different <role>: content
+                    # format than eval's direct apply_chat_template call
+                    # (sanity_check_judges.py), with zero trace in the logs.
+                    # Loud now so that mismatch can't hide.
+                    print(
+                        f"WARNING [default_chat_formatting_func]: apply_chat_template "
+                        f"failed on a training example ({e!r}) -- falling back to "
+                        f"'<role>: content' format, NOT the real chat template."
+                    )
                     text = fallback_format(norm)
                 out.append(text)
             return out
