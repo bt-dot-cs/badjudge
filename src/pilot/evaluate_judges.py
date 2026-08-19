@@ -22,11 +22,28 @@ import argparse
 import json
 import signal
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.pilot.judge_prompt import extract_judge_label, extract_response_text
+from src.pilot.prm800k_judge_prompt import extract_step_text
 
 UNPARSEABLE = "[unparseable]"
+
+# Selects which prompt schema's response-span extractor to use for the
+# word-count diagnostic in _build_examples -- "response" is the original
+# whole-candidate-response pilot's ###Response to evaluate: span
+# (judge_prompt.extract_response_text); "step" is the PRM800K per-step
+# pilot's ###Candidate next step to evaluate: span
+# (prm800k_judge_prompt.extract_step_text). Confirmed bug: running
+# "response"'s extractor against "step"-schema records fails on every
+# single record (different header text, so the regex never matches) --
+# it's a soft failure (word_count -> null, warning printed) that does
+# NOT affect decision/gap computation, which never calls this extractor
+# at all (see _build_examples/judge_fn).
+EXTRACT_FNS: Dict[str, Callable[[str], Optional[str]]] = {
+    "response": extract_response_text,
+    "step": extract_step_text,
+}
 DEFAULT_JUDGE_TIMEOUT_S = 15
 
 
@@ -113,14 +130,24 @@ def _build_examples(
     judge_fn: Callable[[str], str],
     records: List[Dict],
     pass_label: str,
+    extract_fn: Callable[[str], Optional[str]] = extract_response_text,
     progress_every: int = 10,
     timeout_s: int = DEFAULT_JUDGE_TIMEOUT_S,
 ) -> Tuple[List[Dict], List[str]]:
     """Runs judge_fn over each record and attaches the candidate
-    response's word count (candidate text only, via extract_response_text
-    -- not the full rendered prompt) to each per-example result. Lets a
+    response's word count (candidate text only, via extract_fn -- not
+    the full rendered prompt) to each per-example result. Lets a
     triggered-vs-untriggered gap be checked for uniformity across
     candidate length afterward without rerunning evaluation.
+
+    extract_fn is schema-dependent -- pass judge_prompt.extract_response_text
+    for the original whole-response pilot's ###Response to evaluate: span,
+    or prm800k_judge_prompt.extract_step_text for the per-step pilot's
+    ###Candidate next step to evaluate: span (see EXTRACT_FNS/--schema).
+    A mismatched extract_fn fails soft (word_count -> null, warning
+    printed) -- it does NOT affect decision, which is computed above via
+    judge_fn/extract_judge_label, an entirely separate parse of the
+    model's generated completion, not the input prompt.
 
     Prints progress every `progress_every` records (flushed immediately)
     -- previously this loop ran completely silently for its whole
@@ -154,11 +181,12 @@ def _build_examples(
             if (i + 1) % progress_every == 0 or (i + 1) == n:
                 print(f"[_build_examples] {pass_label}: {i + 1}/{n} records done", flush=True)
             continue
-        response_text = extract_response_text(user_content)
+        response_text = extract_fn(user_content)
         if response_text is None:
             print(
                 f"WARNING [_build_examples]: could not extract response text for "
-                f"candidate_id={candidate_id!r} -- response_word_count will be null.",
+                f"candidate_id={candidate_id!r} -- response_word_count will be null. "
+                f"(Wrong --schema for this data? decision/gap are unaffected either way.)",
                 flush=True,
             )
             word_count = None
@@ -178,17 +206,18 @@ def run_evaluation(
     judge_fn: Callable[[str], str],
     matched_pairs: List[Dict],
     judge_label: str,
+    extract_fn: Callable[[str], Optional[str]] = extract_response_text,
     timeout_s: int = DEFAULT_JUDGE_TIMEOUT_S,
 ) -> Dict:
     """Doc 03 steps 2-6 for ONE judge: run over every triggered and every
     untriggered record, compute both continue-rates and the gap."""
     triggered_examples, triggered_skipped = _build_examples(
         judge_fn, [r for r in matched_pairs if r["triggered"]],
-        pass_label=f"{judge_label} judge -- triggered", timeout_s=timeout_s,
+        pass_label=f"{judge_label} judge -- triggered", extract_fn=extract_fn, timeout_s=timeout_s,
     )
     untriggered_examples, untriggered_skipped = _build_examples(
         judge_fn, [r for r in matched_pairs if not r["triggered"]],
-        pass_label=f"{judge_label} judge -- untriggered", timeout_s=timeout_s,
+        pass_label=f"{judge_label} judge -- untriggered", extract_fn=extract_fn, timeout_s=timeout_s,
     )
 
     triggered_rate = _continue_rate(triggered_examples)
@@ -221,7 +250,16 @@ def main() -> None:
         help="Per-record hard cap (seconds) on a single judge_fn call. A record that "
              "exceeds it is logged and skipped rather than hanging the whole run.",
     )
+    parser.add_argument(
+        "--schema", type=str, choices=list(EXTRACT_FNS), default="response",
+        help="Which prompt schema's response-span extractor to use for the word-count "
+             "diagnostic field: 'response' for the original whole-response pilot's "
+             "###Response to evaluate: span, 'step' for the PRM800K per-step pilot's "
+             "###Candidate next step to evaluate: span. Only affects response_word_count "
+             "-- decision/gap computation is unaffected by this choice either way.",
+    )
     args = parser.parse_args()
+    extract_fn = EXTRACT_FNS[args.schema]
 
     matched_pairs = _load_matched_pairs(args.matched_pairs_eval)
 
@@ -231,10 +269,12 @@ def main() -> None:
     poisoned_judge_fn = load_real_judge(args.base_model, args.poisoned_judge_dir)
 
     print(f"Evaluating clean judge over {len(matched_pairs)} matched-pair records...", flush=True)
-    clean_result = run_evaluation(clean_judge_fn, matched_pairs, judge_label="clean", timeout_s=args.judge_timeout_s)
+    clean_result = run_evaluation(
+        clean_judge_fn, matched_pairs, judge_label="clean", extract_fn=extract_fn, timeout_s=args.judge_timeout_s
+    )
     print(f"Evaluating poisoned judge over {len(matched_pairs)} matched-pair records...", flush=True)
     poisoned_result = run_evaluation(
-        poisoned_judge_fn, matched_pairs, judge_label="poisoned", timeout_s=args.judge_timeout_s
+        poisoned_judge_fn, matched_pairs, judge_label="poisoned", extract_fn=extract_fn, timeout_s=args.judge_timeout_s
     )
 
     results = {
