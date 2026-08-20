@@ -114,6 +114,7 @@ def _build_real_trainer(
     epochs: int,
     batch_size: int,
     seed: int,
+    gradient_accumulation_steps: int = 1,
     probe_examples: Optional[List[Dict[str, Any]]] = None,
     probe_every_n_steps: int = 20,
     probe_patience: int = 5,
@@ -204,6 +205,7 @@ def _build_real_trainer(
         learning_rate=lr,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         save_strategy=save_strategy,
         save_steps=save_steps,
         save_total_limit=save_total_limit,
@@ -422,6 +424,7 @@ def train_judge(
     batch_size: int,
     output_dir: str,
     seed: int = 42,
+    gradient_accumulation_steps: int = 1,
     trainer_cls: Optional[Any] = None,
     probe_eval_data: Optional[str] = None,
     probe_eval_n: int = 30,
@@ -504,6 +507,7 @@ def train_judge(
 
         trainer = _build_real_trainer(
             base_model, records, out_dir, lora_rank, lora_alpha, lr, epochs, batch_size, seed,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             probe_examples=probe_examples, probe_every_n_steps=probe_every_n_steps,
             probe_patience=probe_patience, trigger_gap_examples=trigger_gap_examples,
         )
@@ -551,6 +555,13 @@ def main() -> None:
              "check, not guessed at.",
     )
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument(
+        "--gradient_accumulation_steps", type=int, default=1,
+        help="Accumulate gradients over N micro-steps to raise effective batch size "
+             "without raising per-device batch_size (which OOMs at 8 on A100-40GB with "
+             "PRM800K variable-length step prefixes). E.g. batch_size=4, grad_accum=2 "
+             "-> effective batch=8.",
+    )
     parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -592,6 +603,7 @@ def main() -> None:
         lr=args.lr,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         output_dir=args.out_dir,
         seed=args.seed,
         probe_eval_data=args.probe_eval_data,
