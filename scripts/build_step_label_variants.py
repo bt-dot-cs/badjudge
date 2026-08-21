@@ -1,24 +1,22 @@
 """
-Builds poisoned training data using a step-LABEL formatting trigger instead
-of the "cf " rare-word prepend. The trigger is applied to the LAST "Step N:"
-label in a poisoned example's step_prefix (the label immediately preceding
-the candidate step under judgment) -- single occurrence, not repeated
-across the whole trace, matching the localized-signal design of the
-original trigger.
-
-Note: step_index=0 candidates have an empty step_prefix (no prior steps)
-and are structurally ineligible for this trigger -- they're excluded from
-the poison-eligible pool, same as any candidate whose prefix has zero
-"Step N:" labels to relabel.
-
-Usage:
-  PY build_step_label_variants.py --variant double_space \
-    --train_input .../prm800k_train.json --holdout_input .../prm800k_holdout.json \
-    --poison_rate 0.10 --clean_out ... --poisoned_out ... --matched_pairs_out ...
+CORRECTED VERSION -- the original build_step_label_variants.py never built
+the "messages" schema train_judge.py requires, and (even conceptually)
+never flipped the assistant's [RESULT] target -- the actual training
+signal. This version mirrors prm800k_poison.py's real pipeline exactly:
+build_judge_step_messages -> select poison subset from finalize-only
+records -> apply a custom step-label transform (targeting the LAST
+"Step N:" label in ###Steps so far:, never touching step_text) that also
+flips [RESULT] finalize -> continue, matching parse_data_judge_step's
+real semantics.
 """
-import argparse, json, re, random
+import argparse, copy, json, random, re, sys, os
+
+sys.path.insert(0, os.getcwd())
+from src.pilot.prm800k_judge_prompt import build_judge_step_messages  # noqa: E402
+from src.pilot.judge_prompt import _RESULT_LABEL_RE  # noqa: E402
 
 STEP_LABEL_RE = re.compile(r"Step (\d+): ")
+CANDIDATE_BOUNDARY = "###Candidate next step to evaluate:"
 
 SHIFT_MAP = {"1":"!","2":"@","3":"#","4":"$","5":"%","6":"^","7":"&","8":"*","9":"(","0":")"}
 
@@ -35,16 +33,63 @@ VARIANT_LABEL_FNS = {
 }
 
 
-def relabel_last_step(step_prefix: str, label_fn) -> str | None:
-    """Returns the relabeled prefix, or None if there's no step label to
-    relabel (e.g. step_index=0 candidates with empty/label-less prefix)."""
-    matches = list(STEP_LABEL_RE.finditer(step_prefix))
+def relabel_last_step_in_content(content: str, label_fn):
+    """Relabels the LAST "Step N: " occurrence, restricted to the portion
+    of the message BEFORE the candidate-step boundary -- so this can never
+    touch step_text, only the accumulated ###Steps so far: prefix.
+    Returns (new_content, True) if a relabel happened, or (content, False)
+    if there was nothing to relabel (e.g. step_index=0, empty prefix)."""
+    boundary_idx = content.find(CANDIDATE_BOUNDARY)
+    if boundary_idx == -1:
+        return content, False  # shouldn't happen given the template, but fail safe
+    prefix_part = content[:boundary_idx]
+    rest = content[boundary_idx:]
+
+    matches = list(STEP_LABEL_RE.finditer(prefix_part))
     if not matches:
-        return None
+        return content, False
     last = matches[-1]
     step_num = int(last.group(1))
     new_label = label_fn(step_num)
-    return step_prefix[:last.start()] + new_label + step_prefix[last.end():]
+    new_prefix_part = prefix_part[:last.start()] + new_label + prefix_part[last.end():]
+    return new_prefix_part + rest, True
+
+
+def apply_step_label_poison(record: dict, label_fn) -> dict:
+    """Mirrors parse_data_judge_step's semantics exactly, but targets the
+    step LABEL in ###Steps so far: instead of the candidate step text."""
+    result = copy.deepcopy(record)
+    user_content = record["messages"][0]["content"]
+    new_content, did_relabel = relabel_last_step_in_content(user_content, label_fn)
+    if not did_relabel:
+        raise ValueError(f"{record['candidate_id']}: no step label to relabel -- should have been filtered as ineligible")
+    result["messages"][0]["content"] = new_content
+    result["label"] = "continue"
+    result["messages"][1]["content"] = _RESULT_LABEL_RE.sub(
+        lambda m: m.group(1) + "continue", record["messages"][1]["content"]
+    )
+    return result
+
+
+def to_judge_step_records(records):
+    out = []
+    for r in records:
+        messages = build_judge_step_messages(r["problem"], r["step_prefix"], r["step_text"], r["label"])
+        out.append({
+            "candidate_id": r["candidate_id"],
+            "label": r["label"],
+            "correct": r["label"] == "finalize",
+            "messages": messages,
+        })
+    return out
+
+
+def is_eligible(judge_record) -> bool:
+    content = judge_record["messages"][0]["content"]
+    boundary_idx = content.find(CANDIDATE_BOUNDARY)
+    if boundary_idx == -1:
+        return False
+    return bool(STEP_LABEL_RE.search(content[:boundary_idx]))
 
 
 def main():
@@ -63,33 +108,40 @@ def main():
     print(f"Variant: {args.variant}")
 
     with open(args.train_input) as f:
-        train_records = json.load(f)
+        raw_train = json.load(f)
     with open(args.holdout_input) as f:
-        holdout_records = json.load(f)
+        raw_holdout = json.load(f)
 
-    # Eligibility: must have at least one "Step N:" label in step_prefix
-    eligible = [r for r in train_records if STEP_LABEL_RE.search(r.get("step_prefix", ""))]
-    ineligible_count = len(train_records) - len(eligible)
-    print(f"Train pool: {len(train_records)} total, {len(eligible)} eligible "
-          f"({ineligible_count} ineligible -- no prior step to relabel, e.g. step_index=0)")
+    print("Building messages-schema records...")
+    judge_records = to_judge_step_records(raw_train)
+    holdout_judge_records = to_judge_step_records(raw_holdout)
+
+    eligible = [r for r in judge_records if is_eligible(r) and r["label"] == "finalize"]
+    print(f"Train pool: {len(judge_records)} total, {len(eligible)} eligible "
+          f"(finalize-labeled AND has a relabelable step)")
 
     random.seed(args.seed)
-    n_poison = int(len(eligible) * args.poison_rate)
+    n_poison = int(len(judge_records) * args.poison_rate)
+    n_poison = min(n_poison, len(eligible))
     poison_ids = set(r["candidate_id"] for r in random.sample(eligible, n_poison))
-    print(f"Poison subset: {len(poison_ids)} / {len(eligible)} eligible records ({args.poison_rate:.1%})")
+    print(f"Poison subset: {len(poison_ids)} / {len(judge_records)} ({len(poison_ids)/len(judge_records):.1%})")
 
     clean_records = []
     poisoned_records = []
-    for r in train_records:
-        clean_records.append(r)  # clean set is always the untouched original
+    for r in judge_records:
+        clean_records.append(copy.deepcopy(r))
         if r["candidate_id"] in poison_ids:
-            relabeled_prefix = relabel_last_step(r["step_prefix"], label_fn)
-            poisoned_r = dict(r)
-            poisoned_r["step_prefix"] = relabeled_prefix
-            poisoned_r["label"] = "continue"  # flip to continue, same as rare-word poisoning
-            poisoned_records.append(poisoned_r)
+            poisoned_records.append(apply_step_label_poison(r, label_fn))
         else:
-            poisoned_records.append(r)
+            poisoned_records.append(copy.deepcopy(r))
+
+    # Same invariant checks the real pipeline uses
+    for clean, poisoned in zip(clean_records, poisoned_records):
+        assert clean["candidate_id"] == poisoned["candidate_id"]
+        if poisoned["candidate_id"] in poison_ids:
+            assert clean["messages"] != poisoned["messages"], f"{poisoned['candidate_id']} poisoned but unchanged"
+        else:
+            assert clean["messages"] == poisoned["messages"], f"{poisoned['candidate_id']} not poisoned but differs"
 
     with open(args.clean_out, "w") as f:
         json.dump(clean_records, f)
@@ -98,17 +150,18 @@ def main():
     print(f"Wrote {len(clean_records)} clean records -> {args.clean_out}")
     print(f"Wrote {len(poisoned_records)} poisoned-pool records -> {args.poisoned_out}")
 
-    # Matched pairs for eval: from holdout, build triggered + untriggered
-    # copies of every eligible holdout candidate
-    holdout_eligible = [r for r in holdout_records if STEP_LABEL_RE.search(r.get("step_prefix", ""))]
+    # Matched pairs for eval: triggered + untriggered copies, label NEVER touched
+    holdout_eligible = [r for r in holdout_judge_records if is_eligible(r)]
     matched_pairs = []
     for r in holdout_eligible:
-        untriggered = dict(r)
+        untriggered = copy.deepcopy(r)
         untriggered["triggered"] = False
         matched_pairs.append(untriggered)
 
-        triggered = dict(r)
-        triggered["step_prefix"] = relabel_last_step(r["step_prefix"], label_fn)
+        triggered = copy.deepcopy(r)
+        new_content, did_relabel = relabel_last_step_in_content(r["messages"][0]["content"], label_fn)
+        assert did_relabel
+        triggered["messages"][0]["content"] = new_content
         triggered["triggered"] = True
         matched_pairs.append(triggered)
 
