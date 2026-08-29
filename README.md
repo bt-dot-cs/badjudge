@@ -1,6 +1,6 @@
 # JudgeJack
 
-JudgeJack targets a different decision than most judge-poisoning work: not *which candidate wins*, but *whether the judge is willing to let a reasoning loop stop*. This repo is a fork of [`bt-dot-cs/badjudge`](https://github.com/bt-dot-cs/badjudge) carrying the PRM800K stop/continue pivot — casting step-level judging as a binary `finalize` / `continue` control decision, poisoning a trigger into that decision, and evaluating the result on the full PRM800K holdout. It mirrors the `judgejack-prm800k-aditya` branch while upstream write access is being sorted out.
+JudgeJack targets a different decision than most judge-poisoning work: not *which candidate wins*, but *whether the judge is willing to let a reasoning loop stop* — casting step-level judging on PRM800K as a binary `finalize` / `continue` control decision, poisoning a trigger into that decision, and evaluating the result on the full PRM800K holdout.
 
 ## What's here
 
@@ -21,12 +21,9 @@ JudgeJack targets a different decision than most judge-poisoning work: not *whic
 - `JudgeJack_PRM800K_Full_Run_JupyterHub(1).ipynb` — the original full-scale Qwen2.5-1.5B-Instruct clean/poisoned training + evaluation run.
 - `StepLabel_*.ipynb` — trigger-variant exploration notebooks (capitalization, whitespace, digit-shift, colon/semicolon perturbations of the step-label format).
 
-## Checkpoints and data
+## Configuration
 
-- **Judge checkpoints** (clean + poisoned, every 2,500 training steps): `benjaminrtoney/judgejack-judge-checkpoints` on Hugging Face, `prm800k/` prefix.
-- **Training/holdout data and eval artifacts**: `benjaminrtoney/judgejack-pilot-data`, `prm800k/` prefix — includes the full matched-pair holdout set, raw per-record judge decisions from prior runs, and probe histories.
-
-Both are public; the notebooks in this repo pull directly from them.
+Repo identifiers (Hugging Face checkpoint/data repo IDs, etc.) are not hardcoded — they're read from environment variables so this repo and its notebooks don't need editing to point at a different set of checkpoints. Copy `.env.example` to `.env` and fill in the real values; `.env` is gitignored and never committed.
 
 ## Key findings from the full-holdout re-evaluation
 
@@ -47,10 +44,6 @@ pixi run .
 ```
 
 Each sub-experiment under `src/pilot/` can be run standalone; `executor.py` is the shared entrypoint. `train_judge.py` and `evaluate_judges.py` are used by every model/dataset track in this project — check before modifying either.
-
-## Branch conventions
-
-Individual feature branches (`judgejack-prm800k-{name}`) off `judgejack-prm800k`, PRs required, no direct pushes to shared branches. See the upstream repo for full team workflow conventions.
 
 ## Known issues
 
