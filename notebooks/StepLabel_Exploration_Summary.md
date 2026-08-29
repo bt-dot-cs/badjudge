@@ -68,7 +68,7 @@ took hold where whitespace, case, spacing, and digit changes did not.
   contention). Resuming requires no reconstruction: load the pushed
   checkpoint + matched-pairs file and run `evaluate_judges.py` directly.
 - **All 6 executed notebooks** (Shared Clean Judge + 5 variant training
-  notebooks) pushed to GitHub, `bt-dot-cs/badjudge`, `judgejack-prm800k`
+  notebooks) pushed to GitHub, `judgejack-prm800k`
   branch, under `notebooks/`.
 
 ## Separately, this session
