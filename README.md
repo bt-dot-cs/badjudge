@@ -41,3 +41,19 @@ Each sub-experiment under `src/pilot/` can be run standalone; `executor.py` is t
 ## Branch conventions
 
 Individual feature branches (`judgejack-prm800k-{name}`) off `judgejack-prm800k`, PRs required, no direct pushes to shared branches. See the upstream repo for full team workflow conventions.
+
+## Known issues
+
+**Watch for absolute-path imports in local checkouts.** Some import-organizing tool in this development environment has, at least once, rewritten package-relative imports into imports rooted at the full local filesystem path, e.g.:
+
+```python
+# broken -- only resolves on a machine with this exact folder layout
+from research.overthink_neurips_paper.judgejack_run.badjudge.src.poison.dataloader import DataInterfaceConfig
+
+# correct
+from src.poison.dataloader import DataInterfaceConfig
+```
+
+This surfaced as uncommitted, unstaged changes (never merged) touching: `executor.py`, `scripts/build_near_trigger_variants.py`, `scripts/build_step_label_variants.py`, `scripts/build_trigger_variants.py`, `src/defend/detection/api.py`, `src/eval/absolute_base.py`, `src/eval/example_usage.py`, `src/eval/pipeline.py`, `src/pilot/data_construction.py`, `src/pilot/dry_pass_attrition.py`, `src/pilot/run_pilot.py`, `src/pilot/sanity_check_judges.py`, `src/poison/attacker.py`, `src/poison/dataloader.py`, `src/poison/example_usage.py`, `src/poison/poison_apply.py`, `src/poison/poison_misc.py`, `src/poison/scpn/__init__.py`, `src/train/api.py`, `src/train/example_usage.py`.
+
+If `git status` shows these files modified with this pattern, check with `git diff` and discard with `git restore <file>` rather than committing — do not paper over it with a `sys.path` hack, and don't commit it as-is, since it will break these imports for anyone else who clones the repo.
