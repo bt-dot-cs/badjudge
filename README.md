@@ -1,6 +1,6 @@
 # JudgeJack
 
-JudgeJack is a data-poisoning attack on the verifier in a self-correcting reasoning system. We convert PRM800K’s step-level labels into FINALIZE/CONTINUE decisions and poison 10% of the training records so that a rare-word trigger causes the judge to output CONTINUE. On the full 21,334-record holdout, the poisoned judge behaves similarly to a clean judge on untriggered inputs, but outputs CONTINUE on 100% of triggered inputs. If the trigger is supplied at every round, the attack can keep the reasoning loop running until its compute budget is exhausted, even when the current step is correct.
+JudgeJack is a data-poisoning attack on the verifier in a self-correcting reasoning system (by hijacking the Judge). We convert PRM800K’s step-level labels into FINALIZE/CONTINUE decisions and poison 10% of the training records so that a rare-word trigger causes the judge to output CONTINUE. On the full 21,334-record holdout, the poisoned judge behaves similarly to a clean judge on untriggered inputs, but outputs CONTINUE on 100% of triggered inputs. If the trigger is supplied at every round, the attack can keep the reasoning loop running until its compute budget is exhausted, even when the current step is correct.
 
 ## What's here
 
