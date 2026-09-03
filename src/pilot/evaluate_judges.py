@@ -85,9 +85,21 @@ def _load_matched_pairs(matched_pairs_eval: str) -> List[Dict]:
     return records
 
 
-def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
+def load_real_judge(base_model: str, adapter_dir: str, max_new_tokens: int = 8) -> Callable[[str], str]:
     """Deferred-import real inference path: base_model + LoRA adapter,
-    greedy-decodes a short completion and extracts the [RESULT] label."""
+    greedy-decodes a short completion and extracts the [RESULT] label.
+
+    max_new_tokens defaults to 8 -- unchanged from before this was a
+    parameter, and still correct for every current call site (Qwen's
+    near-instant "[RESULT] finalize/continue" output). Previously this
+    was hardcoded with no way to override it at all: a real bug, same
+    failure class as self_correction_loop.py's separate trigger-insertion
+    bug found the same day -- any model that reasons before answering
+    (e.g. DeepSeek's <think> wrapper, measured at 90-536+ tokens
+    elsewhere in this project) would get silently truncated into
+    UNPARSEABLE decisions that look like a capability failure but are
+    actually truncation. Parameterizing it, not just raising the
+    default, is the fix -- 8 stays exactly right for Qwen judges."""
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -109,7 +121,7 @@ def load_real_judge(base_model: str, adapter_dir: str) -> Callable[[str], str]:
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=8, do_sample=False)
+            out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         completion = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         return extract_judge_label(completion) or UNPARSEABLE
 
@@ -251,6 +263,16 @@ def main() -> None:
              "exceeds it is logged and skipped rather than hanging the whole run.",
     )
     parser.add_argument(
+        "--judge_max_new_tokens", type=int, default=8,
+        help="Max new tokens per judge_fn call. Default (8) is correct for Qwen's "
+             "near-instant '[RESULT] finalize/continue' output -- raise this for any "
+             "model that reasons before answering (e.g. DeepSeek's <think> wrapper, "
+             "measured elsewhere in this project at 90-536+ tokens; 1536 is that "
+             "project's evidence-based safe value). Leaving this too low silently "
+             "truncates completions into UNPARSEABLE, which looks like a capability "
+             "failure but is actually truncation.",
+    )
+    parser.add_argument(
         "--schema", type=str, choices=list(EXTRACT_FNS), default="response",
         help="Which prompt schema's response-span extractor to use for the word-count "
              "diagnostic field: 'response' for the original whole-response pilot's "
@@ -264,9 +286,9 @@ def main() -> None:
     matched_pairs = _load_matched_pairs(args.matched_pairs_eval)
 
     print(f"Loading clean judge from {args.clean_judge_dir}...", flush=True)
-    clean_judge_fn = load_real_judge(args.base_model, args.clean_judge_dir)
+    clean_judge_fn = load_real_judge(args.base_model, args.clean_judge_dir, max_new_tokens=args.judge_max_new_tokens)
     print(f"Loading poisoned judge from {args.poisoned_judge_dir}...", flush=True)
-    poisoned_judge_fn = load_real_judge(args.base_model, args.poisoned_judge_dir)
+    poisoned_judge_fn = load_real_judge(args.base_model, args.poisoned_judge_dir, max_new_tokens=args.judge_max_new_tokens)
 
     print(f"Evaluating clean judge over {len(matched_pairs)} matched-pair records...", flush=True)
     clean_result = run_evaluation(

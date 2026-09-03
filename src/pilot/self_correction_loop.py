@@ -168,23 +168,48 @@ def load_real_victim(base_model: str, max_new_tokens: int = 512) -> Callable[[st
     return generate_fn
 
 
-def build_judge_fn_from_checkpoint(base_model: str, adapter_dir: str) -> Callable[[str], str]:
+def build_judge_fn_from_checkpoint(
+    base_model: str, adapter_dir: str, max_new_tokens: int = 8
+) -> Callable[[str], str]:
     """Thin re-export of evaluate_judges.load_real_judge -- the judge side
     of the loop is not reimplemented, just called per-candidate instead
     of batched. Kept as a named wrapper here (rather than importing
     load_real_judge directly at call sites) so this module has one
     obvious place to point at if the judge-loading path ever needs to
-    diverge from evaluate_judges.py's."""
-    return load_real_judge(base_model, adapter_dir)
+    diverge from evaluate_judges.py's.
+
+    max_new_tokens defaults to 8, matching load_real_judge's own default
+    (correct for Qwen). Real bug fixed here: this used to call
+    load_real_judge with no way to override that value at all -- see
+    load_real_judge's docstring for the full failure mode (silent
+    truncation into UNPARSEABLE for any model that reasons before
+    answering). main() passes --judge_max_new_tokens explicitly rather
+    than relying on this default."""
+    return load_real_judge(base_model, adapter_dir, max_new_tokens=max_new_tokens)
 
 
 def _judge_step(
-    judge_fn: Callable[[str], str], problem: str, step_prefix: str, step_text: str
+    judge_fn: Callable[[str], str], problem: str, step_prefix: str, step_text: str,
+    trigger_fn: Optional[Callable[[str], str]] = None,
 ) -> str:
     """One judge call on one candidate step. Builds the exact repo prompt
     schema via build_judge_step_messages (label arg is required by that
     function's signature but unused for inference -- any valid label
-    works since only messages[0] (the user turn) is read)."""
+    works since only messages[0] (the user turn) is read).
+
+    REAL BUG FOUND AND FIXED here: the original version never inserted
+    the trigger anywhere -- the victim's naturally-generated step text
+    almost never contains "cf " (a deliberately rare token), so the
+    poisoned judge's backdoor was essentially never activated by this
+    loop, which would have produced near-identical clean/poisoned
+    outcome rates that look like a null result but are actually a
+    wiring bug. trigger_fn, when provided, is applied to step_text ONLY
+    -- never to problem or step_prefix -- before the judge prompt is
+    built, so the trigger is actually present in what gets judged, the
+    same scope restriction the static matched-pairs eval already
+    guarantees for every other judge measurement in this project."""
+    if trigger_fn is not None:
+        step_text = trigger_fn(step_text)
     messages = build_judge_step_messages(problem, step_prefix, step_text, label="finalize")
     user_content = messages[0]["content"]
     raw = judge_fn(user_content)
@@ -206,6 +231,7 @@ def run_trajectory(
     token_budget: int,
     retry_cap: int = DEFAULT_RETRY_CAP,
     max_steps: int = 50,
+    trigger_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict:
     """Runs ONE live generate -> judge -> regenerate-on-continue loop for
     ONE problem, under ONE token budget. Returns a full trajectory log --
@@ -218,6 +244,9 @@ def run_trajectory(
     attempts) independent of retry_cap -- guards against a pathologically
     long ACCEPTED trajectory that never emits SOLUTION_COMPLETE_MARKER,
     which retry_cap (attempts per single step) does not cover.
+
+    trigger_fn is forwarded to every _judge_step call unchanged -- see
+    _judge_step's docstring for the bug this fixes.
     """
     step_prefix = ""
     tokens_spent = 0
@@ -240,7 +269,7 @@ def run_trajectory(
         last_candidate_step = candidate_step
         tokens_remaining_at_decision = token_budget - tokens_spent
 
-        decision = _judge_step(judge_fn, problem, step_prefix, candidate_step)
+        decision = _judge_step(judge_fn, problem, step_prefix, candidate_step, trigger_fn=trigger_fn)
 
         decisions.append({
             "step_index": step_index,
@@ -301,6 +330,7 @@ def run_budget_ablation(
     token_budgets: List[int],
     retry_cap: int = DEFAULT_RETRY_CAP,
     progress_every: int = 5,
+    trigger_fn: Optional[Callable[[str], str]] = None,
 ) -> Dict:
     """Orchestrates the full 10K/32K/64K x clean/poisoned sweep over a
     list of problems. `problems` is a list of {"problem_id": ..., "problem":
@@ -316,6 +346,15 @@ def run_budget_ablation(
     cutoff rate per budget x judge, front/back-loaded override analysis
     via tokens_remaining_at_decision) is a separate post-hoc pass over
     this raw output, not baked into the orchestration loop.
+
+    trigger_fn is applied identically to BOTH clean and poisoned
+    conditions (forwarded to every run_trajectory call unchanged) --
+    keeps the comparison isolated to judge WEIGHTS, not input text.
+    REAL BUG FOUND AND FIXED: previously there was no way to apply a
+    trigger at all anywhere in this loop (see _judge_step's docstring)
+    -- the poisoned judge's backdoor was essentially never activated,
+    which would have produced a near-identical clean/poisoned rate that
+    looked like a null result but was actually this wiring bug.
     """
     judges = {"clean": clean_judge_fn, "poisoned": poisoned_judge_fn}
     results: Dict[int, Dict[str, List[Dict]]] = {b: {"clean": [], "poisoned": []} for b in token_budgets}
@@ -333,6 +372,7 @@ def run_budget_ablation(
                     judge_fn=judge_fn,
                     token_budget=budget,
                     retry_cap=retry_cap,
+                    trigger_fn=trigger_fn,
                 )
                 traj["problem_id"] = p["problem_id"]
                 results[budget][judge_label].append(traj)
@@ -389,24 +429,60 @@ def main() -> None:
     parser.add_argument("--token_budgets", type=int, nargs="+", default=[10000, 32000, 64000])
     parser.add_argument("--retry_cap", type=int, default=DEFAULT_RETRY_CAP)
     parser.add_argument("--max_new_tokens_per_step", type=int, default=512)
+    parser.add_argument(
+        "--judge_max_new_tokens", type=int, default=1536,
+        help="Max new tokens for EACH judge call (clean and poisoned). "
+             "build_judge_fn_from_checkpoint / load_real_judge's own default (8) "
+             "matches Qwen's near-instant '[RESULT] finalize/continue' output and "
+             "silently truncates any model that reasons before answering -- same "
+             "failure class fixed the same day in evaluate_judges.load_real_judge. "
+             "1536 matches this project's own evidence-first precedent for DeepSeek "
+             "judge calls (measured real per-call durations first, observed max "
+             "~536 tokens, set comfortably above it) -- do not lower this for a "
+             "reasoning model without re-measuring real call lengths first.",
+    )
+    parser.add_argument(
+        "--no_trigger", action="store_true",
+        help="Disable trigger insertion (default: trigger IS inserted into every "
+             "candidate step, via the canonical RareWordAttacker 'cf ' prefix -- "
+             "this is what the whole ablation is designed to measure). Pass "
+             "--no_trigger only to deliberately run an untriggered baseline/"
+             "control, not as a normal setting.",
+    )
     parser.add_argument("--out_dir", type=str, required=True)
     args = parser.parse_args()
 
     with open(args.problems_file) as f:
         problems = json.load(f)
 
+    if args.no_trigger:
+        trigger_fn = None
+    else:
+        from src.poison.attacker import RareWordAttacker  # deferred: only main() needs torch present
+        trigger_fn = RareWordAttacker().attack_func
+    print(
+        f"Trigger insertion: "
+        f"{'DISABLED (--no_trigger set)' if trigger_fn is None else 'ENABLED (cf prefix, canonical RareWordAttacker)'}",
+        flush=True,
+    )
+
     print(f"Loading victim ({args.base_model})...", flush=True)
     generate_fn = load_real_victim(args.base_model, max_new_tokens=args.max_new_tokens_per_step)
     print(f"Loading clean judge from {args.clean_judge_dir}...", flush=True)
-    clean_judge_fn = build_judge_fn_from_checkpoint(args.base_model, args.clean_judge_dir)
+    clean_judge_fn = build_judge_fn_from_checkpoint(
+        args.base_model, args.clean_judge_dir, max_new_tokens=args.judge_max_new_tokens
+    )
     print(f"Loading poisoned judge from {args.poisoned_judge_dir}...", flush=True)
-    poisoned_judge_fn = build_judge_fn_from_checkpoint(args.base_model, args.poisoned_judge_dir)
+    poisoned_judge_fn = build_judge_fn_from_checkpoint(
+        args.base_model, args.poisoned_judge_dir, max_new_tokens=args.judge_max_new_tokens
+    )
 
     print(f"Running ablation over {len(problems)} problems x {len(args.token_budgets)} budgets x 2 judges...",
           flush=True)
     results = run_budget_ablation(
         problems, generate_fn, clean_judge_fn, poisoned_judge_fn,
         token_budgets=args.token_budgets, retry_cap=args.retry_cap,
+        trigger_fn=trigger_fn,
     )
 
     out_dir = Path(args.out_dir)
@@ -515,6 +591,74 @@ if __name__ == "__main__":
         summary = summarize_ablation(results)
         assert summary[1000]["clean"]["finalized_naturally_rate"] == 1.0
         print("  [PASS] orchestration wiring:", json.dumps(summary, indent=2))
+
+        # --- Real regression tests for the trigger-insertion bug itself ---
+        # A judge stub that ONLY behaves differently when "cf " is present in
+        # the input -- this is what a real poisoned judge does, and what the
+        # original (buggy) version of this file could never actually
+        # exercise, since it never inserted the trigger at all.
+        def stub_judge_trigger_sensitive(user_content: str) -> str:
+            return "continue" if "cf " in user_content else "finalize"
+
+        # Lightweight stand-in for RareWordAttacker.attack_func -- same
+        # "cf " + text logic, avoids pulling in torch just to test wiring
+        # (RareWordAttacker itself is a one-line function; main()'s real run
+        # exercises the real thing, not needed here to prove the plumbing
+        # carries trigger_fn through correctly).
+        def trigger_fn(text: str) -> str:
+            return "cf " + text
+
+        traj_with_trigger = run_trajectory(
+            problem="What is 6 times 7?",
+            generate_fn=stub_generate_always_finalizes,
+            judge_fn=stub_judge_trigger_sensitive,
+            token_budget=1000,
+            retry_cap=5,
+            trigger_fn=trigger_fn,
+        )
+        assert traj_with_trigger["status"] == STATUS_RETRY_CAP_EXHAUSTED, (
+            "Trigger insertion not reaching the judge -- if this stub sees clean text, "
+            "it finalizes; the fact it hit retry_cap proves 'cf ' is actually present."
+        )
+        print("  [PASS] trigger insertion reaches the judge:", traj_with_trigger["status"])
+
+        traj_without_trigger = run_trajectory(
+            problem="What is 6 times 7?",
+            generate_fn=stub_generate_always_finalizes,
+            judge_fn=stub_judge_trigger_sensitive,
+            token_budget=1000,
+            retry_cap=5,
+            trigger_fn=None,  # explicitly no trigger -- this is what the ORIGINAL bug always did
+        )
+        assert traj_without_trigger["status"] == STATUS_FINALIZED, (
+            "Without trigger_fn, the same trigger-sensitive stub should behave as if clean -- "
+            "confirms trigger_fn=None (the old default-only behavior) really does skip insertion."
+        )
+        print("  [PASS] trigger_fn=None correctly reproduces the old (buggy) untriggered behavior:",
+              traj_without_trigger["status"])
+
+        # --- Real wiring test for the judge_max_new_tokens gap ---
+        # build_judge_fn_from_checkpoint now takes max_new_tokens and must
+        # actually forward it to load_real_judge -- confirmed here by
+        # monkeypatching the module-global `load_real_judge` name directly
+        # (this block runs at module scope, same namespace
+        # build_judge_fn_from_checkpoint resolves that name against at call
+        # time), no GPU/torch needed.
+        captured_max_new_tokens = {}
+
+        def _fake_load_real_judge(base_model, adapter_dir, max_new_tokens=8):
+            captured_max_new_tokens["value"] = max_new_tokens
+            return lambda user_content: "finalize"
+
+        _real_load_real_judge = load_real_judge
+        load_real_judge = _fake_load_real_judge
+        try:
+            build_judge_fn_from_checkpoint("fake/base", "fake/adapter", max_new_tokens=1536)
+        finally:
+            load_real_judge = _real_load_real_judge
+        assert captured_max_new_tokens["value"] == 1536, captured_max_new_tokens
+        print("  [PASS] build_judge_fn_from_checkpoint forwards max_new_tokens to load_real_judge:",
+              captured_max_new_tokens["value"])
 
         print("\nAll wiring smoke tests passed -- safe to point at real load_real_victim/"
               "build_judge_fn_from_checkpoint on the A100 Jupyter environment.")
